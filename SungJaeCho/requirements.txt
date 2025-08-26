@@ -1,0 +1,8 @@
+tqdm
+tiktoken
+unstructured[all]
+PyMuPDF
+pdfminer.six
+pdfplumber
+llama-index-core
+llama-index-readers-file
