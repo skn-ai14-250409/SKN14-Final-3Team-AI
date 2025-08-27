@@ -1,4 +1,0 @@
-﻿n_elements,n_tables,n_headings,n_paragraphs,total_tokens,avg_chunk_tokens,clause_heading_ratio,parser,pdf,elapsed_sec,jsonl,total_pages,page_coverage,order_breaks,duplicate_ratio,noise_ratio,std_chunk_tokens,elapsed_per_page,avg_table_rows,numeric_cell_ratio,score
-92,39,0,53,28010,304.46,1.0,pdfplumber,230918_금융소비자용 금소법 안내자료_f.pdf,1.565,./parser_outputs/230918_금융소비자용 금소법 안내자료_f.pdfplumber.jsonl,57,0.93,0,0.391,0.402,214.02,0.027,1.31,0.001,80.02860000000003
-85,73,0,12,57013,670.46,17.0,pdfplumber,financial_product_description_image (6).pdf,2.22,./parser_outputs/financial_product_description_image (6).pdfplumber.jsonl,12,1.0,0,0.094,0.141,844.73,0.185,12.3,0.23,172.4605
-41,27,0,14,21599,526.39,4.0,pdfplumber,보금자리론설명서_220114 (2).pdf,2.729,./parser_outputs/보금자리론설명서_220114 (2).pdfplumber.jsonl,14,1.0,0,0.024,0.0,546.02,0.195,7.56,0.497,61.1975
