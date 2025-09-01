@@ -45,7 +45,7 @@ async def delete_all_vectors():
     return BaseResponse(status="successful")
 
 @router.post("/run_worflow")
-async def run_worflow(input: RunWorkflowInput):
+async def run_workflow(input: RunWorkflowInput):
     orchestrator = Orchestrator()
     response = orchestrator.run_workflow(input.prompt)
     return RunWorkflowResponse(
