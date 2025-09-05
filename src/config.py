@@ -38,6 +38,7 @@ EMBEDDING_MODEL_NAME = "text-embedding-ada-002"  # OpenAI 임베딩 모델 강�
 
 # 벡터 스토어 설정
 VECTOR_STORE_INDEX_NAME = get_required_env("VECTOR_STORE_INDEX_NAME", "kb-financial-docs")
+PINECONE_METRIC = get_required_env("PINECONE_METRIC")
 
 # 문서 처리 설정
 CHUNK_SIZE = get_required_int_env("CHUNK_SIZE", 1000)
