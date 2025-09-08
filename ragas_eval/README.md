@@ -2,6 +2,8 @@
 
 OpenAI 호환 LLM 엔드포인트(예: RunPod vLLM, LM Studio, Ollama 등)로 답변을 생성하고, RAGAS 지표로 평가하는 가벼운 파이프라인입니다. 비밀이 아닌 설정은 `settings.toml`, 비밀은 `.env`로 분리되어 있으며, LLM 호출을 생략하는 드라이런 모드도 지원합니다.
 
+간단 사용법은 settings.txt에 있습니다.
+
 ## 주요 특징
 
 - OpenAI 호환 생성 클라이언트(RunPod vLLM, LM Studio, Ollama 등과 호환)
