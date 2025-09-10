@@ -7,7 +7,7 @@ from pathlib import Path
 import os
 
 from src.orchestrator import Orchestrator
-from src.experimental.langgraph_rag import get_langgraph_workflow
+from src.langgraph.langgraph_rag import get_langgraph_workflow
 from src.rag.vector_store import VectorStore
 from src.config import VECTOR_STORE_INDEX_NAME, DATA_FOLDER_PATH
 from src.constants import STATUS_SUCCESS, STATUS_FAIL
@@ -190,7 +190,7 @@ async def answer_with_llm_only(input: LLMOnlyInput):
 @router.post("/experimental/langgraph_rag")
 async def experimental_langgraph_rag(input: QueryRagInput):
     """
-    🧪 실험용 LangGraph RAG 엔드포인트
+    실험용 LangGraph RAG 엔드포인트
     
     기존 orchestrator와 동일한 기능을 LangGraph로 구현한 실험용 버전
     기존 코드는 그대로 유지하고 새로운 접근 방식을 테스트하기 위한 엔드포인트

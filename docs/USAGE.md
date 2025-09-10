@@ -9,14 +9,19 @@ python run_server.py --reload --host 0.0.0.0 --port 8000
 
 ### 2. 데이터 업로드
 ```bash
-# 전체 데이터 업로드
-python tools/manage_data.py upload --all
+# 서버 상태 확인
+python evaluation/manage_data.py --action status
 
 # 특정 폴더 업로드
-python tools/manage_data.py upload --folder 법률
+python evaluation/manage_data.py --action upload-folder --path 법률
+python evaluation/manage_data.py --action upload-folder --path 내규
+python evaluation/manage_data.py --action upload-folder --path 상품
 
-# 개별 파일 업로드
-python tools/manage_data.py upload --file "강령/공통/윤리강령.pdf"
+# 개별 파일 업로드 (쉼표로 구분)
+python evaluation/manage_data.py --action upload-files --path "강령/공통/윤리강령.pdf,법률/개인정보보호법.pdf"
+
+# 빠른 테스트
+python evaluation/manage_data.py --action test
 ```
 
 ### 3. RAG 질의
@@ -41,7 +46,10 @@ curl -X POST "http://localhost:8000/api/v1/answer_with_llm_only" \
 
 ```bash
 # CLI로 상태 확인
-python tools/manage_data.py status
+python evaluation/manage_data.py --action status
+
+# 벡터 스토어 통계
+python evaluation/manage_data.py --action stats
 
 # API로 상태 확인
 curl -X GET "http://localhost:8000/health"                               # 서버 상태
@@ -81,18 +89,22 @@ curl -X POST "http://localhost:8000/api/v1/query_rag_by_folder" \
 
 ### 데이터 업로드
 ```bash
-# 전체 데이터 업로드
-python tools/manage_data.py upload --all
+# 서버 상태 확인
+python evaluation/manage_data.py --action status
+
+# 벡터 스토어 통계 확인
+python evaluation/manage_data.py --action stats
 
 # 특정 폴더 업로드
-python tools/manage_data.py upload --folder 내규
-python tools/manage_data.py upload --folder 법률
-python tools/manage_data.py upload --folder 상품
+python evaluation/manage_data.py --action upload-folder --path 내규
+python evaluation/manage_data.py --action upload-folder --path 법률
+python evaluation/manage_data.py --action upload-folder --path 상품
 
-# 개별 파일 업로드
-python tools/manage_data.py upload --file "강령/공통/윤리강령.pdf"
-python tools/manage_data.py upload --file "법률/개인정보보호법.pdf"
-python tools/manage_data.py upload --file "상품/개인_신용대출/신용대출_약관.pdf"
+# 개별 파일 업로드 (쉼표로 구분)
+python evaluation/manage_data.py --action upload-files --path "강령/공통/윤리강령.pdf,법률/개인정보보호법.pdf"
+
+# 빠른 테스트
+python evaluation/manage_data.py --action test
 
 # API로 개별 파일 업로드
 curl -X POST "http://localhost:8000/api/v1/upload_docs_to_rag" \
@@ -101,14 +113,14 @@ curl -X POST "http://localhost:8000/api/v1/upload_docs_to_rag" \
 
 ### 데이터 삭제
 ```bash
-# 전체 삭제
-python tools/manage_data.py clear
+# 전체 삭제 (주의!)
+python evaluation/manage_data.py --action delete-all
 
 # 조건부 삭제
-python tools/manage_data.py delete --field file_name --value "경제전망보고서(2025.05).pdf"
-python tools/manage_data.py delete --field main_category --value "상품"
-python tools/manage_data.py delete --field sub_category --value "공통"
-python tools/manage_data.py delete --field upload_date --value "2024-01"
+python evaluation/manage_data.py --action delete-condition --field file_name --value "경제전망보고서(2025.05).pdf"
+python evaluation/manage_data.py --action delete-condition --field main_category --value "상품"
+python evaluation/manage_data.py --action delete-condition --field sub_category --value "공통"
+python evaluation/manage_data.py --action delete-condition --field upload_date --value "2024-01"
 
 # API로 삭제
 curl -X DELETE "http://localhost:8000/api/v1/delete_all_vectors"
@@ -120,8 +132,8 @@ curl -X DELETE "http://localhost:8000/api/v1/delete_vectors_by_condition" \
 ## 🧪 성능 평가
 
 ```bash
-# 통합 테스트 도구 (추천)
-python tests/comprehensive_rag_evaluator.py
+# 성능 평가 도구 (추천)
+python evaluation/performance_evaluator.py
 
 # 옵션 선택:
 # 1. 🚀 빠른 테스트 (4개 기본 케이스)
@@ -182,37 +194,37 @@ curl -X POST "http://localhost:8000/api/v1/query_rag" \
 ### **특정 파일 삭제**
 ```bash
 # 특정 파일명으로 삭제
-python tools/manage_data.py delete --field file_name --value "경제전망보고서(2025.05).pdf"
+python evaluation/manage_data.py --action delete-condition --field file_name --value "경제전망보고서(2025.05).pdf"
 
 # 특정 경로의 파일 삭제
-python tools/manage_data.py delete --field file_path --value "강령/공통/윤리강령.pdf"
+python evaluation/manage_data.py --action delete-condition --field file_path --value "강령/공통/윤리강령.pdf"
 ```
 
 ### **카테고리별 정리**
 ```bash
 # 강령 폴더의 모든 문서 삭제
-python tools/manage_data.py delete --field main_category --value "강령"
+python evaluation/manage_data.py --action delete-condition --field main_category --value "강령"
 
 # 상품 폴더의 개인 신용대출만 삭제
-python tools/manage_data.py delete --field sub_category --value "개인_신용대출"
+python evaluation/manage_data.py --action delete-condition --field sub_category --value "개인_신용대출"
 
 # 정책 관련 문서만 삭제
-python tools/manage_data.py delete --field document_category --value "policy"
+python evaluation/manage_data.py --action delete-condition --field document_category --value "policy"
 ```
 
 ### **업로드일 기준 정리**
 ```bash
 # 2024년 1월에 업로드된 모든 문서 삭제
-python tools/manage_data.py delete --field upload_date --value "2024-01"
+python evaluation/manage_data.py --action delete-condition --field upload_date --value "2024-01"
 ```
 
 ### **컨텐츠 기반 정리**
 ```bash
 # 윤리 관련 문서만 삭제
-python tools/manage_data.py delete --field contains_ethics --value "true"
+python evaluation/manage_data.py --action delete-condition --field contains_ethics --value "true"
 
 # 금리 정보가 포함된 문서만 삭제
-python tools/manage_data.py delete --field contains_interest_rate --value "true"
+python evaluation/manage_data.py --action delete-condition --field contains_interest_rate --value "true"
 ```
 
 ## 🚨 문제 해결
@@ -227,7 +239,7 @@ python tools/manage_data.py delete --field contains_interest_rate --value "true"
 - 파일 경로가 올바른지 확인
 
 ### 검색 결과 없음
-- 데이터가 업로드되었는지 확인: `python tools/manage_data.py status`
+- 데이터가 업로드되었는지 확인: `python evaluation/manage_data.py status`
 - 질문이 너무 구체적이지 않은지 확인
 - 카테고리별 검색 시도
 
@@ -235,22 +247,21 @@ python tools/manage_data.py delete --field contains_interest_rate --value "true"
 
 ### **시스템 관리**
 ```bash
-python tools/manage_data.py status                    # 상태 확인
+python evaluation/manage_data.py status                    # 상태 확인
 curl -X GET "http://localhost:8000/api/v1/healthcheck"    # 서버 상태
 curl -X GET "http://localhost:8000/api/v1/vector_store_stats"  # 벡터 스토어 통계
 ```
 
 ### **데이터 업로드**
 ```bash
-python tools/manage_data.py upload --all              # 전체 데이터 업로드
-python tools/manage_data.py upload --folder 강령      # 특정 폴더 업로드
-python tools/manage_data.py upload --file "강령/공통/윤리강령.pdf"  # 개별 파일 업로드
+python evaluation/manage_data.py --action upload-folder --path 강령      # 특정 폴더 업로드
+python evaluation/manage_data.py --action upload-files --path "강령/공통/윤리강령.pdf"  # 개별 파일 업로드
 ```
 
 ### **데이터 삭제**
 ```bash
-python tools/manage_data.py clear                     # 전체 삭제
-python tools/manage_data.py delete --field [필드명] --value [값]  # 조건부 삭제
+python evaluation/manage_data.py --action delete-all                     # 전체 삭제
+python evaluation/manage_data.py --action delete-condition --field [필드명] --value [값]  # 조건부 삭제
 ```
 
 ### **RAG 질의**
@@ -268,7 +279,9 @@ curl -X POST "http://localhost:8000/api/v1/answer_with_intent_router" \
 
 ### **성능 평가**
 ```bash
-python tests/comprehensive_rag_evaluator.py           # 통합 테스트 도구
+python evaluation/performance_evaluator.py           # 성능 평가 도구
+python evaluation/pipeline_tester.py --type all     # 파이프라인 테스트
+python evaluation/pipeline_tester.py --type langgraph    # LangGraph 실험용 테스트
 ```
 
 ## 📚 추가 정보
