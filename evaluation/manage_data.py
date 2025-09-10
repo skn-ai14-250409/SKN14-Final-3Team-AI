@@ -193,7 +193,7 @@ class DataManager:
     def quick_test(self):
         """빠른 테스트"""
         print("🧪 빠른 RAG 테스트")
-        test_query = "KB 스마트론에 대해 알려주세요"
+        test_query = "KB 4대연금 신용대출에 대해 알려주세요"
         
         try:
             response = requests.post(

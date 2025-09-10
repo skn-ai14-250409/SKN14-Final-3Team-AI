@@ -45,6 +45,8 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evaluation.test_dataset import dataset, get_dataset_stats
+from evaluation.openai_evaluator import OpenAIAnswerEvaluator
+from evaluation.result_saver import TestResultSaver
 
 # 동적 엔드포인트 설정
 ENDPOINT = "/process_with_intent_routing" if USE_INTENT_ROUTING else "/query_rag"
@@ -59,9 +61,10 @@ class RAGMetrics:
             return 0.0
         
         retrieved_at_k = retrieved_files[:k]
-        relevant_retrieved = sum(1 for file in retrieved_at_k if file in expected_files)
+        # 중복 제거하여 고유한 관련 문서 수 계산
+        unique_relevant_retrieved = len(set(retrieved_at_k) & set(expected_files))
         
-        return relevant_retrieved / min(k, len(retrieved_at_k))
+        return unique_relevant_retrieved / min(k, len(retrieved_at_k))
     
     @staticmethod
     def calculate_recall_at_k(retrieved_files: List[str], expected_files: List[str], k: int) -> float:
@@ -70,9 +73,10 @@ class RAGMetrics:
             return 0.0
         
         retrieved_at_k = retrieved_files[:k]
-        relevant_retrieved = sum(1 for file in retrieved_at_k if file in expected_files)
+        # 중복 제거하여 고유한 관련 문서 수 계산
+        unique_relevant_retrieved = len(set(retrieved_at_k) & set(expected_files))
         
-        return relevant_retrieved / len(expected_files)
+        return unique_relevant_retrieved / len(expected_files)
     
     @staticmethod
     def calculate_f1_at_k(retrieved_files: List[str], expected_files: List[str], k: int) -> float:
@@ -277,7 +281,7 @@ class QuickTester:
         
         # 간단한 테스트 케이스들
         test_cases = [
-            "KB 스마트론에 대해 알려주세요",
+            "KB 4대연금 신용대출에 대해 알려주세요",
             "대출 금리는 어떻게 되나요?",
             "신용대출 조건이 뭔가요?",
             "담보대출과 신용대출의 차이점은?"
@@ -392,33 +396,33 @@ class BasicTester:
         test_cases = [
             {
                 "id": "basic_001",
-                "query": "KB 스마트론의 대출 한도는 얼마인가요?",
-                "expected_answer": "KB 스마트론의 대출 한도는 개인의 신용등급과 소득에 따라 결정되며, 일반적으로 연소득의 일정 배수 내에서 설정됩니다.",
-                "expected_file": ["KB_스마트론.pdf"]
+                "query": "KB 4대연금 신용대출의 대출 한도는 얼마인가요?",
+                "expected_answer": "4대연금(국민연금, 공무원연금, 사학연금, 군인연금) 수령액을 기준으로 대출한도가 결정됩니다.",
+                "expected_file": ["KB_4대연금_신용대출.pdf"]
             },
             {
                 "id": "basic_002", 
-                "query": "신용대출 금리는 어떻게 책정되나요?",
-                "expected_answer": "신용대출 금리는 개인의 신용등급, 소득수준, 거래실적 등을 종합적으로 고려하여 차등 적용됩니다.",
-                "expected_file": ["KB_개인신용대출.pdf"]
+                "query": "중도상환수수료란 무엇인가요?",
+                "expected_answer": "중도상환수수료는 대출 기간 중 대출금을 조기상환할 때 부과되는 수수료로, 계약 조건에 따라 부과 기간(보통 최초 실행일부터 최장 3년 등)과 계산 방식이 달라집니다.",
+                "expected_file": ["중도상환수수료_변경으로_부담이_줄어들어요.pdf"]
             },
             {
                 "id": "basic_003",
-                "query": "담보대출과 신용대출의 주요 차이점은 무엇인가요?",
-                "expected_answer": "담보대출은 부동산 등의 담보를 제공하여 낮은 금리로 대출받는 방식이고, 신용대출은 담보 없이 개인의 신용도만으로 대출받는 방식입니다.",
-                "expected_file": ["KB_담보대출.pdf", "KB_신용대출.pdf"]
+                "query": "대출 갈아타기(대환대출)란 무엇인가요?",
+                "expected_answer": "대출 갈아타기(대환대출)는 기존 대출을 더 유리한 조건의 대출로 옮기는 서비스로, 모바일로 간편하게 이전 대출을 상환하고 새로운 대출로 전환할 수 있는 제도입니다.",
+                "expected_file": ["대출_갈아타기_총정리.pdf"]
             },
             {
                 "id": "basic_004",
-                "query": "대출 신청 시 필요한 서류는 무엇인가요?",
-                "expected_answer": "대출 신청 시 신분증, 소득증명서, 재직증명서, 통장사본 등의 기본 서류가 필요하며, 담보대출의 경우 부동산 관련 서류가 추가로 필요합니다.",
-                "expected_file": ["KB_대출신청서류.pdf"]
+                "query": "원금균등 상환 방식의 장단점은 무엇인가요?",
+                "expected_answer": "원금균등 상환은 매달 동일한 원금을 갚고 이자는 잔존원금에 따라 줄어드는 방식으로 총 이자액이 적지만 초기 상환 부담이 큽니다.",
+                "expected_file": ["대출_상환_방식_원금_균등vs.원리금_균등_차이_알아보기.pdf"]
             },
             {
                 "id": "basic_005",
-                "query": "중도상환 수수료는 어떻게 되나요?",
-                "expected_answer": "중도상환 수수료는 대출 상품과 상환 시기에 따라 다르며, 일부 상품의 경우 일정 기간 후 수수료가 면제되기도 합니다.",
-                "expected_file": ["KB_중도상환.pdf"]
+                "query": "금리인하요구권은 무엇인가요?",
+                "expected_answer": "은행여신약정에서 고객의 신용상태가 객관적으로 개선되었다고 판단되는 경우 고객이 은행에 금리인하를 요구할 수 있는 권리입니다.",
+                "expected_file": ["KB_금리인하요구권.pdf"]
             }
         ]
         
@@ -560,13 +564,30 @@ class BasicTester:
 class ComprehensiveRAGEvaluator:
     """종합 RAG 평가 시스템"""
     
-    def __init__(self, endpoint_type: str = "intent"):
+    def __init__(self, endpoint_type: str = "intent", use_openai_eval: bool = True):
         self.base_url = BASE_URL
         self.metrics = RAGMetrics()
         self.answer_evaluator = AnswerQualityEvaluator()
         self.results = []
         self.endpoint_type = endpoint_type
         self.endpoint = ENDPOINT_OPTIONS.get(endpoint_type, ENDPOINT_OPTIONS["intent"])
+        self.use_openai_eval = use_openai_eval
+        
+        # OpenAI 평가기 초기화
+        if use_openai_eval:
+            try:
+                self.openai_evaluator = OpenAIAnswerEvaluator()
+                print("OpenAI 평가 시스템이 활성화되었습니다.")
+            except Exception as e:
+                print(f"OpenAI 평가 시스템 초기화 실패: {e}")
+                print("기본 평가 방식으로 전환합니다.")
+                self.use_openai_eval = False
+                self.openai_evaluator = None
+        else:
+            self.openai_evaluator = None
+        
+        # 결과 저장기 초기화
+        self.result_saver = TestResultSaver()
     
     def check_server(self) -> bool:
         """서버 상태 확인"""
@@ -626,9 +647,22 @@ class ComprehensiveRAGEvaluator:
             }
             
             # === 답변 품질 평가 ===
-            answer_quality = self.answer_evaluator.evaluate_answer_quality(
-                generated_answer, expected_answer, query
-            )
+            if self.use_openai_eval and self.openai_evaluator:
+                # OpenAI 평가 사용
+                openai_evaluation = self.openai_evaluator.evaluate_answer(
+                    query, expected_answer, generated_answer
+                )
+                answer_quality = {
+                    "overall_score": sum(openai_evaluation["scores"].values()) / 4,  # 평균 점수
+                    "openai_rating": openai_evaluation["overall_rating"],
+                    "openai_scores": openai_evaluation["scores"],
+                    "openai_explanation": openai_evaluation["explanation"]
+                }
+            else:
+                # 기본 평가 사용
+                answer_quality = self.answer_evaluator.evaluate_answer_quality(
+                    generated_answer, expected_answer, query
+                )
             
             # 검색된 문서 상세 정보
             source_details = []
@@ -647,7 +681,13 @@ class ComprehensiveRAGEvaluator:
             print(f"Recall@3: {retrieval_metrics['recall_at_3']:.3f}")
             print(f"F1@3: {retrieval_metrics['f1_at_3']:.3f}")
             print(f"MRR: {retrieval_metrics['mrr']:.3f}")
-            print(f"답변 품질: {answer_quality['overall_score']:.3f}")
+            
+            if self.use_openai_eval and self.openai_evaluator:
+                print(f"답변 품질: {answer_quality['overall_score']:.3f} ({answer_quality['openai_rating']})")
+                print(f"OpenAI 평가: {answer_quality['openai_explanation']}")
+            else:
+                print(f"답변 품질: {answer_quality['overall_score']:.3f}")
+            
             print(f"생성된 답변: {generated_answer[:150]}...")
             
             if source_details:
@@ -698,10 +738,16 @@ class ComprehensiveRAGEvaluator:
         if category_filter:
             test_cases = [case for case in test_cases if case.get("category") == category_filter]
             print(f"카테고리 필터 적용: {category_filter}")
+            self._category_filter = category_filter
+        else:
+            self._category_filter = None
         
         if difficulty_filter:
             test_cases = [case for case in test_cases if case.get("difficulty") == difficulty_filter]
             print(f"난이도 필터 적용: {difficulty_filter}")
+            self._difficulty_filter = difficulty_filter
+        else:
+            self._difficulty_filter = None
         
         print(f"총 {len(test_cases)}개 테스트 케이스 평가 시작")
         print(f"사용 엔드포인트: {self.endpoint} ({self.endpoint_type})")
@@ -820,6 +866,47 @@ class ComprehensiveRAGEvaluator:
             print("  경고: 답변 관련성이 낮습니다. 질의 이해 능력을 향상시키세요.")
         
         print(f"\n평가 완료! 총 {successful_tests}개 테스트 케이스를 성공적으로 평가했습니다.")
+        
+        # === 결과 저장 ===
+        try:
+            # 저장할 결과 데이터 구성
+            save_results = {
+                "test_results": self.results,
+                "summary": {
+                    "total_tests": total_tests,
+                    "successful_tests": successful_tests,
+                    "retrieval_metrics_avg": retrieval_metrics_avg,
+                    "answer_quality_avg": answer_quality_avg,
+                    "overall_performance": overall_performance,
+                    "grade": grade,
+                    "recommendation": recommendation
+                }
+            }
+            
+            # 테스트 유형 결정
+            test_type = "전체테스트"
+            if hasattr(self, '_category_filter') and self._category_filter:
+                test_type = f"카테고리테스트_{self._category_filter}"
+            elif hasattr(self, '_difficulty_filter') and self._difficulty_filter:
+                test_type = f"난이도테스트_{self._difficulty_filter}"
+            
+            # 결과 저장
+            saved_file = self.result_saver.save_results(
+                test_name="performance_evaluator",
+                endpoint=self.endpoint_type,
+                test_type=test_type,
+                results=save_results,
+                metadata={
+                    "use_openai_eval": self.use_openai_eval,
+                    "total_cases": len(self.results),
+                    "successful_cases": successful_tests
+                }
+            )
+            
+            print(f"\n결과가 저장되었습니다: {saved_file}")
+            
+        except Exception as e:
+            print(f"\n결과 저장 중 오류 발생: {e}")
 
 def main():
     """메인 실행 함수"""
@@ -875,7 +962,11 @@ def main():
             print(f"  난이도별 분포: {stats['difficulty_distribution']}")
             print()
             
-            evaluator = ComprehensiveRAGEvaluator(endpoint_type)
+            # OpenAI 평가 사용 여부 선택
+            use_openai = input("OpenAI 평가를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
+            use_openai_eval = use_openai != 'n'
+            
+            evaluator = ComprehensiveRAGEvaluator(endpoint_type, use_openai_eval)
             evaluator.run_comprehensive_evaluation()
             
         elif choice == "4":
@@ -894,7 +985,11 @@ def main():
                     selected_category = categories[cat_idx]
                     print(f"\n선택된 카테고리: {selected_category}")
                     
-                    evaluator = ComprehensiveRAGEvaluator(endpoint_type)
+                    # OpenAI 평가 사용 여부 선택
+                    use_openai = input("OpenAI 평가를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
+                    use_openai_eval = use_openai != 'n'
+                    
+                    evaluator = ComprehensiveRAGEvaluator(endpoint_type, use_openai_eval)
                     evaluator.run_comprehensive_evaluation(category_filter=selected_category)
                 else:
                     print("잘못된 선택입니다.")
@@ -917,7 +1012,11 @@ def main():
                     selected_difficulty = difficulties[diff_idx]
                     print(f"\n선택된 난이도: {selected_difficulty}")
                     
-                    evaluator = ComprehensiveRAGEvaluator(endpoint_type)
+                    # OpenAI 평가 사용 여부 선택
+                    use_openai = input("OpenAI 평가를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
+                    use_openai_eval = use_openai != 'n'
+                    
+                    evaluator = ComprehensiveRAGEvaluator(endpoint_type, use_openai_eval)
                     evaluator.run_comprehensive_evaluation(difficulty_filter=selected_difficulty)
                 else:
                     print("잘못된 선택입니다.")
