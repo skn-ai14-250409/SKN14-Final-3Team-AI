@@ -13,7 +13,7 @@ python run_server.py --reload --host 0.0.0.0 --port 8000
 python tools/manage_data.py upload --all
 
 # 특정 폴더 업로드
-python tools/manage_data.py upload --folder 강령
+python tools/manage_data.py upload --folder 법률
 
 # 개별 파일 업로드
 python tools/manage_data.py upload --file "강령/공통/윤리강령.pdf"
@@ -21,9 +21,20 @@ python tools/manage_data.py upload --file "강령/공통/윤리강령.pdf"
 
 ### 3. RAG 질의
 ```bash
+# 기존 파이프라인
 curl -X POST "http://localhost:8000/api/v1/query_rag" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "KB금융그룹의 윤리강령은 무엇인가요?"}'
+
+# 새로운 Intent 기반 라우터 파이프라인 (권장)
+curl -X POST "http://localhost:8000/api/v1/answer_with_intent_router" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "KB금융그룹의 윤리강령은 무엇인가요?"}'
+
+# LLM 전용 답변 (RAG 없이)
+curl -X POST "http://localhost:8000/api/v1/answer_with_llm_only" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "안녕하세요"}'
 ```
 
 ## 📊 시스템 상태 확인
@@ -33,18 +44,23 @@ curl -X POST "http://localhost:8000/api/v1/query_rag" \
 python tools/manage_data.py status
 
 # API로 상태 확인
-curl -X GET "http://localhost:8000/api/v1/healthcheck"                    # 서버 상태
-curl -X GET "http://localhost:8000/api/v1/vector_store_status"            # 벡터 스토어 상태
-curl -X GET "http://localhost:8000/api/v1/vector_store_stats"             # 벡터 스토어 통계
+curl -X GET "http://localhost:8000/health"                               # 서버 상태
+curl -X GET "http://localhost:8000/api/v1/vector_store_stats"            # 벡터 스토어 통계
 ```
 
 ## 🔍 검색 및 질의
 
 ### 기본 RAG 질의
 ```bash
+# 기존 파이프라인
 curl -X POST "http://localhost:8000/api/v1/query_rag" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "질문 내용"}'
+
+# 새로운 Intent 기반 라우터 파이프라인 (권장)
+curl -X POST "http://localhost:8000/api/v1/answer_with_intent_router" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "질문 내용"}'
 ```
 
 ### 카테고리별/폴더별 검색
@@ -69,7 +85,7 @@ curl -X POST "http://localhost:8000/api/v1/query_rag_by_folder" \
 python tools/manage_data.py upload --all
 
 # 특정 폴더 업로드
-python tools/manage_data.py upload --folder 강령
+python tools/manage_data.py upload --folder 내규
 python tools/manage_data.py upload --folder 법률
 python tools/manage_data.py upload --folder 상품
 
@@ -90,7 +106,7 @@ python tools/manage_data.py clear
 
 # 조건부 삭제
 python tools/manage_data.py delete --field file_name --value "경제전망보고서(2025.05).pdf"
-python tools/manage_data.py delete --field main_category --value "강령"
+python tools/manage_data.py delete --field main_category --value "상품"
 python tools/manage_data.py delete --field sub_category --value "공통"
 python tools/manage_data.py delete --field upload_date --value "2024-01"
 
@@ -239,9 +255,15 @@ python tools/manage_data.py delete --field [필드명] --value [값]  # 조건�
 
 ### **RAG 질의**
 ```bash
+# 기존 파이프라인
 curl -X POST "http://localhost:8000/api/v1/query_rag" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "질문 내용"}'
+
+# 새로운 Intent 기반 라우터 파이프라인 (권장)
+curl -X POST "http://localhost:8000/api/v1/answer_with_intent_router" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "질문 내용"}'
 ```
 
 ### **성능 평가**

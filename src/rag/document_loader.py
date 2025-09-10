@@ -8,12 +8,44 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from fastapi import UploadFile
 import pdfplumber
+import logging
+
+# PDF 폰트 경고 메시지 제거
+logging.getLogger("pdfminer.pdffont").setLevel(logging.ERROR)
 
 from src.config import CHUNK_SIZE, CHUNK_OVERLAP
+from src.constants import (
+    # 카테고리/라벨
+    MAIN_LAW, MAIN_RULE, MAIN_PRODUCT,
+    SUB_COMMON, SUB_RULE_BANK,
+    SUB_PRODUCT_MORTGAGE, SUB_PRODUCT_PERSONAL, SUB_PRODUCT_AUTO,
+    SUB_PRODUCT_HOUSING_FUND, SUB_PRODUCT_CORP,
+    normalize_sub_label,
+    # 키워드
+    KEYWORDS_INTEREST_RATE, KEYWORDS_CONDITIONS, KEYWORDS_APPLICATION,
+    KEYWORDS_POLICY, KEYWORDS_ETHICS,
+    # 파일 관련
+    ALLOWED_EXTENSIONS, PDF_EXT, CSV_EXT,
+    DATA_FOLDER_NAME,
+    # 텍스트 스플리터
+    TEXT_SPLITTER_SEPARATORS,
+)
 
-CSV_EXTENSION = ".csv"
-PDF_EXTENSION = ".pdf"
-ALLOWED_EXTS = {".pdf", ".csv"}
+from src.constants import (
+    # 메타데이터 - 문서 카테고리
+    METADATA_DOCUMENT_CATEGORY_REGULATION, METADATA_DOCUMENT_CATEGORY_PRODUCT, METADATA_DOCUMENT_CATEGORY_UPLOADED,
+    # 메타데이터 - 서브카테고리
+    METADATA_SUBCATEGORY_LAW, METADATA_SUBCATEGORY_CREDIT_POLICY, METADATA_SUBCATEGORY_BANKING_PRODUCT, METADATA_SUBCATEGORY_USER_UPLOAD,
+    # 메타데이터 - 비즈니스 유닛
+    METADATA_BUSINESS_UNIT_COMPLIANCE, METADATA_BUSINESS_UNIT_CREDIT, METADATA_BUSINESS_UNIT_RETAIL_BANKING, METADATA_BUSINESS_UNIT_GENERAL,
+    # 메타데이터 - 상품 타입
+    METADATA_PRODUCT_TYPE_MORTGAGE, METADATA_PRODUCT_TYPE_PERSONAL_LOAN, METADATA_PRODUCT_TYPE_AUTO_LOAN,
+    METADATA_PRODUCT_TYPE_HOUSING_FUND, METADATA_PRODUCT_TYPE_BUSINESS_LOAN,
+    # 메타데이터 - 타겟 고객
+    METADATA_TARGET_CUSTOMER_INDIVIDUAL, METADATA_TARGET_CUSTOMER_CORPORATE,
+)
+
+# 하위 호환성을 위한 별칭 제거 - constants.py 직접 사용
 
 def _estimate_token_count(text: str) -> int:
     if not text:
@@ -25,41 +57,32 @@ class DocumentLoader:
     
     def __init__(self):
         # 문서 카테고리 매핑 (폴더명 → 영어 카테고리)
+        # 메인 카테고리 표준화(요청 사양 반영)
         self.category_mapping = {
-            "강령": {
-                "document_category": "policy", 
-                "subcategory": "ethics", 
-                "business_unit": "corporate"
+            MAIN_LAW: {
+                "document_category": METADATA_DOCUMENT_CATEGORY_REGULATION,
+                "subcategory": METADATA_SUBCATEGORY_LAW,
+                "business_unit": METADATA_BUSINESS_UNIT_COMPLIANCE,
             },
-            "법률": {
-                "document_category": "regulation", 
-                "subcategory": "law", 
-                "business_unit": "compliance"
+            MAIN_RULE: {
+                "document_category": METADATA_DOCUMENT_CATEGORY_REGULATION,
+                "subcategory": METADATA_SUBCATEGORY_CREDIT_POLICY,
+                "business_unit": METADATA_BUSINESS_UNIT_CREDIT,
             },
-            "상품": {
-                "document_category": "product", 
-                "subcategory": "banking_product", 
-                "business_unit": "retail_banking"
+            MAIN_PRODUCT: {
+                "document_category": METADATA_DOCUMENT_CATEGORY_PRODUCT,
+                "subcategory": METADATA_SUBCATEGORY_BANKING_PRODUCT,
+                "business_unit": METADATA_BUSINESS_UNIT_RETAIL_BANKING,
             },
-            "약관": {
-                "document_category": "policy", 
-                "subcategory": "terms", 
-                "business_unit": "legal"
-            },
-            "여신내규": {
-                "document_category": "regulation", 
-                "subcategory": "credit_policy", 
-                "business_unit": "credit"
-            }
         }
         
         # 상품 유형 매핑
         self.product_mapping = {
-            "개인_담보_전세대출": {"product_type": "mortgage", "target_customer": "individual"},
-            "개인_신용대출": {"product_type": "personal_loan", "target_customer": "individual"}, 
-            "개인_자동차_대출": {"product_type": "auto_loan", "target_customer": "individual"},
-            "개인_주택도시기금대출": {"product_type": "housing_fund", "target_customer": "individual"},
-            "기업_대출": {"product_type": "business_loan", "target_customer": "corporate"}
+            SUB_PRODUCT_MORTGAGE: {"product_type": METADATA_PRODUCT_TYPE_MORTGAGE, "target_customer": METADATA_TARGET_CUSTOMER_INDIVIDUAL},
+            SUB_PRODUCT_PERSONAL: {"product_type": METADATA_PRODUCT_TYPE_PERSONAL_LOAN, "target_customer": METADATA_TARGET_CUSTOMER_INDIVIDUAL},
+            SUB_PRODUCT_AUTO: {"product_type": METADATA_PRODUCT_TYPE_AUTO_LOAN, "target_customer": METADATA_TARGET_CUSTOMER_INDIVIDUAL},
+            SUB_PRODUCT_HOUSING_FUND: {"product_type": METADATA_PRODUCT_TYPE_HOUSING_FUND, "target_customer": METADATA_TARGET_CUSTOMER_INDIVIDUAL},
+            SUB_PRODUCT_CORP: {"product_type": METADATA_PRODUCT_TYPE_BUSINESS_LOAN, "target_customer": METADATA_TARGET_CUSTOMER_CORPORATE},
         }
 
     def _extract_keywords_from_filename(self, filename: str) -> List[str]:
@@ -93,9 +116,17 @@ class DocumentLoader:
             if main_category in self.category_mapping:
                 doc_info.update(self.category_mapping[main_category])
             
-            # 상품 카테고리인 경우 세부 정보 추가
-            if main_category == "상품" and sub_category in self.product_mapping:
-                doc_info.update(self.product_mapping[sub_category])
+            # 상품 카테고리인 경우: 서브 라벨 정규화 후 매핑 적용(공백 라벨 기준)
+            if main_category == MAIN_PRODUCT:
+                normalized = normalize_sub_label(sub_category)
+                doc_info["sub_category"] = normalized if normalized else sub_category
+                if normalized in self.product_mapping:
+                    doc_info.update(self.product_mapping[normalized])
+            # 법률/내규 서브 기본값
+            if main_category == MAIN_LAW:
+                doc_info["sub_category"] = SUB_COMMON
+            if main_category == MAIN_RULE and not doc_info.get("sub_category"):
+                doc_info["sub_category"] = SUB_RULE_BANK
                 
         return doc_info
 
@@ -143,21 +174,21 @@ class DocumentLoader:
             
         # 컨텐츠 기반 스마트 태그
         content_lower = content.lower()
-        if "금리" in content_lower or "이자" in content_lower:
+        if any(kw in content_lower for kw in KEYWORDS_INTEREST_RATE):
             metadata["contains_interest_rate"] = True
-        if "조건" in content_lower or "요건" in content_lower:
+        if any(kw in content_lower for kw in KEYWORDS_CONDITIONS):
             metadata["contains_conditions"] = True
-        if "신청" in content_lower or "접수" in content_lower:
+        if any(kw in content_lower for kw in KEYWORDS_APPLICATION):
             metadata["contains_application_info"] = True
-        if "정책" in content_lower or "규정" in content_lower:
+        if any(kw in content_lower for kw in KEYWORDS_POLICY):
             metadata["contains_policy"] = True
-        if "윤리" in content_lower or "준수" in content_lower:
+        if any(kw in content_lower for kw in KEYWORDS_ETHICS):
             metadata["contains_ethics"] = True
             
         # None 값 제거 (Pinecone 효율성을 위해)
         return {k: v for k, v in metadata.items() if v is not None}
 
-    async def get_document_chunks(self, file: UploadFile) -> List[Document]:
+    async def get_document_chunks(self, file: UploadFile) -> List[Document]: # 이걸쓰늕?????????????? 아님 밑???
         """업로드된 파일을 청크로 분할 (향상된 메타데이터 포함)"""
         content_bytes: bytes = await file.read()
         file_name: str = file.filename
@@ -169,14 +200,14 @@ class DocumentLoader:
             "file_path": file_name,
             "file_type": file_ext.lstrip('.'),
             "keywords": self._extract_keywords_from_filename(file_name),
-            "document_category": "uploaded",
-            "subcategory": "user_upload",
-            "business_unit": "general"
+            "document_category": METADATA_DOCUMENT_CATEGORY_UPLOADED,
+            "subcategory": METADATA_SUBCATEGORY_USER_UPLOAD,
+            "business_unit": METADATA_BUSINESS_UNIT_GENERAL
         }
         
-        if file_ext == CSV_EXTENSION:
+        if file_ext == CSV_EXT:
             return self.get_csv_chunks(content_bytes, base_info)
-        elif file_ext == PDF_EXTENSION:
+        elif file_ext == PDF_EXT:
             return self.get_pdf_chunks(content_bytes, base_info)
         raise Exception("Unable to chunk document. Unsupported extension: " + file_ext)
 
@@ -208,7 +239,7 @@ class DocumentLoader:
                     continue
                     
                 text_splitter = RecursiveCharacterTextSplitter(
-                    separators=["\n\n", "\n", ".", "!", "?"],
+                    separators=TEXT_SPLITTER_SEPARATORS,
                     chunk_size=CHUNK_SIZE,
                     chunk_overlap=CHUNK_OVERLAP
                 )
@@ -226,20 +257,20 @@ class DocumentLoader:
         return chunks
 
     @staticmethod
-    def process_folder_and_get_chunks(folder_path: str, allowed_exts: set = ALLOWED_EXTS) -> List[Document]:
+    def process_folder_and_get_chunks(folder_path: str, allowed_exts: set = ALLOWED_EXTENSIONS) -> List[Document]:
         """폴더의 모든 문서를 처리하여 향상된 메타데이터와 함께 청크 생성"""
         target_folder = Path(folder_path).resolve()
         if not target_folder.exists() or not target_folder.is_dir():
             raise ValueError(f"{folder_path} is not a valid folder")
 
         # 메타데이터 추출을 위한 root 경로 결정
-        # SKN14-Final-3Team-Data 내부 구조를 유지하기 위해 부모 경로를 root로 설정
-        if "SKN14-Final-3Team-Data" in str(target_folder):
-            # SKN14-Final-3Team-Data 경로를 찾아서 root로 설정
+        # DATA_FOLDER_NAME 내부 구조를 유지하기 위해 부모 경로를 root로 설정
+        if DATA_FOLDER_NAME in str(target_folder):
+            # DATA_FOLDER_NAME 경로를 찾아서 root로 설정
             parts = target_folder.parts
             data_idx = -1
             for i, part in enumerate(parts):
-                if "SKN14-Final-3Team-Data" in part:
+                if DATA_FOLDER_NAME in part:
                     data_idx = i
                     break
             
@@ -284,7 +315,4 @@ class DocumentLoader:
         return all_chunks
 
 
-# 모듈 레벨 함수 - 하위 호환성을 위해 유지
-def process_folder_and_get_chunks(folder_path: str, allowed_exts: set = ALLOWED_EXTS) -> List[Document]:
-    """폴더의 모든 문서를 처리하여 청크 리스트를 반환합니다."""
-    return DocumentLoader.process_folder_and_get_chunks(folder_path, allowed_exts)
+# 모듈 레벨 함수 제거 - DocumentLoader.process_folder_and_get_chunks() 직접 사용 권장
