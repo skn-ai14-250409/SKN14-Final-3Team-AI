@@ -32,12 +32,11 @@ MODEL_NAME = get_required_env("MODEL_NAME", "gpt-3.5-turbo")
 PINECONE_KEY = get_required_env("PINECONE_KEY")
 
 # 임베딩 설정
-# EMBEDDING_BACKEND = get_required_env("EMBEDDING_BACKEND", "openai")  # openai 또는 huggingface
-EMBEDDING_BACKEND = "openai"  # OpenAI 임베딩 강제 사용
-EMBEDDING_MODEL_NAME = "text-embedding-ada-002"  # OpenAI 임베딩 모델 강제 사용
+EMBEDDING_BACKEND = get_required_env("EMBEDDING_BACKEND")  # openai 또는 huggingface
+EMBEDDING_MODEL_NAME = get_required_env("EMBEDDING_MODEL_NAME") # 예: "text-embedding-3-small" 또는 "bge-m3-small"
 
 # 벡터 스토어 설정
-VECTOR_STORE_INDEX_NAME = get_required_env("VECTOR_STORE_INDEX_NAME", "kb-financial-docs")
+VECTOR_STORE_INDEX_NAME = get_required_env("VECTOR_STORE_INDEX_NAME")
 PINECONE_METRIC = get_required_env("PINECONE_METRIC")
 
 # 문서 처리 설정
@@ -45,7 +44,7 @@ CHUNK_SIZE = get_required_int_env("CHUNK_SIZE", 1000)
 CHUNK_OVERLAP = get_required_int_env("CHUNK_OVERLAP", 200)
 
 # 데이터 폴더 경로
-DATA_FOLDER_PATH = get_required_env("DATA_FOLDER_PATH", "SKN14-Final-3Team-Data")
+DATA_FOLDER_PATH = get_required_env("DATA_FOLDER_PATH", "../SKN14-Final-3Team-Data")
 
 # 설정 검증
 def validate_config():

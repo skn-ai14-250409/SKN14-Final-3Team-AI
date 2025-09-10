@@ -3,24 +3,29 @@
 ## 📁 프로젝트 전체 구조
 
 ```
-pinecone_eval_code/
+SKN14-Final-3Team-AI/
 ├── src/                          # 소스 코드
-│   ├── api/                      # API 관련 코드
+│   ├── api/                      # FastAPI 엔드포인트
+│   │   └── router.py
 │   ├── rag/                      # RAG 시스템 핵심
+│   │   ├── document_loader.py    # 문서 처리 (메타데이터 생성)
+│   │   └── vector_store.py       # 벡터 DB 관리
 │   ├── slm/                      # SLM (Structured Language Model)
-│   ├── utils/                    # 공통 유틸리티
-│   ├── config.py                 # 설정 관리
-│   ├── main.py                   # 메인 애플리케이션
-│   └── orchestrator.py           # 전체 워크플로우 조정
-├── tests/                        # 테스트 코드
-├── tools/                        # CLI 도구
-├── docs/                         # 문서
-└── SKN14-Final-3Team-Data/      # 데이터 폴더
+│   │   ├── slm.py               # SLM 래퍼
+│   │   └── langchain.py         # 실험용 (유지)
+│   ├── pipelines/               # 파이프라인
+│   │   └── sub_main_router.py   # Sub/Main 라우터 기반 파이프라인
+│   ├── config.py                # 환경변수 설정
+│   ├── constants.py             # 모든 상수 통합
+│   ├── main.py                  # FastAPI 앱 진입점
+│   └── orchestrator.py          # 기존 워크플로우
+├── docs/                        # 문서
+└── SKN14-Final-3Team-Data/     # 데이터 폴더
 ```
 
 ## 🏗️ 핵심 모듈 상세 설명
 
-### **1. `src/config.py` - 설정 관리**
+### **1. `src/config.py` - 환경변수 설정**
 
 **역할**: 환경변수와 시스템 설정을 중앙에서 관리
 
@@ -32,14 +37,31 @@ pinecone_eval_code/
 **설정 항목**:
 - `MODEL_KEY`: OpenAI API 키
 - `PINECONE_KEY`: Pinecone API 키
-- `EMBEDDING_BACKEND`: "openai" (강제 설정)
-- `EMBEDDING_MODEL_NAME`: "text-embedding-ada-002"
+- `EMBEDDING_BACKEND`: "openai" 또는 "huggingface"
+- `EMBEDDING_MODEL_NAME`: 임베딩 모델명
 - `VECTOR_STORE_INDEX_NAME`: Pinecone 인덱스명
 - `CHUNK_SIZE`, `CHUNK_OVERLAP`: 문서 청킹 설정
 
+### **2. `src/constants.py` - 상수 통합 관리**
+
+**역할**: 모든 하드코딩된 값들을 상수로 통합 관리
+
+**주요 상수**:
+- **메인 카테고리**: `MAIN_LAW`, `MAIN_RULE`, `MAIN_PRODUCT`
+- **서브 카테고리**: `SUB_COMMON`, `SUB_RULE_BANK`, 상품 서브 라벨들
+- **API 상태**: `STATUS_SUCCESS`, `STATUS_FAIL`
+- **FAQ**: `GENERAL_FAQ`
+- **메타데이터 키워드**: `KEYWORDS_*` 시리즈
+- **파일 확장자**: `ALLOWED_EXTENSIONS`, `PDF_EXT`, `CSV_EXT`
+- **로깅 메시지**: `LOG_*` 시리즈
+- **검색 파라미터**: `RAG_TOP_K`, `SYNTH_MAX_SNIPPET_CHARS`
+
+**주요 함수**:
+- `normalize_sub_label(label)`: 서브 라벨 정규화 (밑줄/공백 혼용 수용)
+
 ---
 
-### **2. `src/orchestrator.py` - 워크플로우 조정**
+### **3. `src/orchestrator.py` - 기존 워크플로우 조정**
 
 **역할**: 사용자 질의를 분석하고 적절한 처리 방식으로 라우팅
 
@@ -63,9 +85,26 @@ pinecone_eval_code/
 
 ---
 
-### **3. `src/rag/` - RAG 시스템 핵심**
+### **4. `src/pipelines/sub_main_router.py` - 새로운 파이프라인**
 
-#### **3.1 `document_loader.py` - 문서 로딩 및 처리**
+**역할**: Sub/Main 라우터 기반의 효율적인 RAG 파이프라인
+
+**주요 함수**:
+- `route_sub_category(question)`: 서브 카테고리 라우팅
+- `route_main_category(question, sub_category)`: 메인 카테고리 라우팅
+- `retrieve_context(question, main_category, sub_category)`: 컨텍스트 검색
+- `synthesize_answer(question, main_category, sub_category, docs)`: 답변 합성
+- `answer_with_sub_main_router(question)`: 전체 파이프라인 실행
+
+**특징**:
+- LLM 기반 라우팅으로 정확한 카테고리 분류
+- 메타데이터 기반 효율적인 검색
+- 소스 로깅으로 투명한 답변 생성 과정
+- GENERAL_FAQ는 LLM 단독으로 빠른 응답
+
+### **5. `src/rag/` - RAG 시스템 핵심**
+
+#### **5.1 `document_loader.py` - 문서 로딩 및 처리**
 
 **역할**: PDF, CSV 등 다양한 문서를 로드하고 청킹
 
@@ -83,7 +122,7 @@ pinecone_eval_code/
 - 컨텐츠 분석: `keywords`, `contains_ethics`, `contains_policy`
 - 업로드 정보: `upload_date`
 
-#### **3.2 `vector_store.py` - 벡터 데이터베이스 관리**
+#### **5.2 `vector_store.py` - 벡터 데이터베이스 관리**
 
 **역할**: Pinecone과의 상호작용 및 벡터 검색
 
@@ -96,18 +135,20 @@ pinecone_eval_code/
 - `similarity_search(query, k)`: 유사도 기반 검색
 - `similarity_search_by_category(query, category)`: 카테고리별 검색
 - `similarity_search_by_folder(query, main_category, sub_category)`: 폴더별 검색
-- `delete_vectors_by_condition(field, value)`: 조건부 벡터 삭제
+- `delete_documents_by_filter(filter_dict)`: 필터 기반 벡터 삭제 (효율적)
+- `delete_vectors_by_condition(field, value)`: 조건부 벡터 삭제 (래퍼)
 - `get_index_stats()`: 인덱스 통계 정보
 
 **특징**:
 - 배치 처리 (100개씩)로 OpenAI API 토큰 제한 우회
-- 더미 벡터를 사용한 메타데이터 필터링
+- `delete_documents_by_filter`로 효율적인 벡터 삭제
+- 메타데이터 기반 정확한 필터링
 
 ---
 
-### **4. `src/api/` - API 엔드포인트**
+### **6. `src/api/` - API 엔드포인트**
 
-#### **4.1 `router.py` - FastAPI 라우터**
+#### **6.1 `router.py` - FastAPI 라우터**
 
 **역할**: HTTP API 엔드포인트 정의 및 요청 처리
 
@@ -116,7 +157,9 @@ pinecone_eval_code/
 **기본 기능**:
 - `GET /healthcheck`: 서버 상태 확인
 - `POST /query_rag`: RAG 질의
-- `POST /run_worflow`: 전체 워크플로우 실행
+- `POST /run_worflow`: 기존 워크플로우 실행
+- `POST /run_workflow`: 워크플로우 실행 (별칭)
+- `POST /sub_main_answer`: 새로운 Sub/Main 라우터 파이프라인
 
 **데이터 관리**:
 - `POST /upload_docs_to_rag`: 개별 파일 업로드
@@ -139,7 +182,7 @@ pinecone_eval_code/
 
 ---
 
-### **5. `src/slm/` - 구조화된 언어 모델**
+### **7. `src/slm/` - 구조화된 언어 모델**
 
 **역할**: 질의를 카테고리별로 분류하는 라우터
 
@@ -149,43 +192,19 @@ pinecone_eval_code/
 
 ---
 
-### **6. `src/utils/` - 공통 유틸리티**
+### **8. `src/slm/langchain.py` - 실험용 LangChain**
 
-#### **6.1 `common.py` - 공통 함수들**
+**역할**: 실험 및 테스트용 LangChain 구현 (현재 유지)
 
-**역할**: 프로젝트 전반에서 사용되는 유틸리티 함수
-
-**주요 함수**:
-
-**서버 관리**:
-- `check_server_health(base_url, timeout)`: 서버 상태 확인
-
-**성능 측정**:
-- `@measure_response_time`: 함수 실행 시간 측정 데코레이터
-- `@safe_api_call`: API 호출 안전 처리 데코레이터
-
-**파일 처리**:
-- `format_file_size(size_bytes)`: 파일 크기 포맷팅
-- `validate_file_extension(filename, allowed_extensions)`: 확장자 검증
-- `sanitize_filename(filename)`: 파일명 정리
-
-**에러 처리**:
-- `@retry_on_failure(max_retries, delay)`: 재시도 데코레이터
-
-**텍스트 분석**:
-- `extract_keywords_from_text(text, min_length)`: 한국어 키워드 추출
-- `calculate_text_similarity(text1, text2)`: 텍스트 유사도 계산
-
-**기타**:
-- `create_progress_bar(current, total, width)`: 진행률 바 생성
-- `parse_metadata_field(field_value)`: 메타데이터 필드 정리
-- `get_memory_usage()`: 메모리 사용량 정보
+**주요 기능**:
+- 기존 RAG 파이프라인 구현
+- 실험적 기능 테스트용
 
 ---
 
-### **7. `tools/` - CLI 도구**
+### **9. `tools/` - CLI 도구**
 
-#### **7.1 `manage_data.py` - 데이터 관리 CLI**
+#### **9.1 `manage_data.py` - 데이터 관리 CLI**
 
 **역할**: 명령줄에서 데이터 업로드/삭제/상태 확인
 
@@ -210,9 +229,9 @@ pinecone_eval_code/
 
 ---
 
-### **8. `tests/` - 테스트 코드**
+### **10. `tests/` - 테스트 코드**
 
-#### **8.1 `comprehensive_rag_evaluator.py` - 통합 테스트 도구**
+#### **10.1 `comprehensive_rag_evaluator.py` - 통합 테스트 도구**
 
 **역할**: RAG 시스템의 종합적인 성능 평가
 
@@ -248,7 +267,7 @@ pinecone_eval_code/
 3. 📊 종합 평가 (데이터셋 기반)
 4. 🔍 빠른 질의 테스트 (직접 입력)
 
-#### **8.2 `rag_test_dataset.py` - 테스트 데이터셋**
+#### **10.2 `rag_test_dataset.py` - 테스트 데이터셋**
 
 **역할**: RAG 시스템 테스트를 위한 질의-답변 데이터셋
 

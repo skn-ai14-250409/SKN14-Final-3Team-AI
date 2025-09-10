@@ -6,6 +6,28 @@
 - 빠른 테스트, 기본 테스트, 종합 평가 통합
 - 전체 시스템 성능 분석
 """
+
+# ================================
+# 설정 상수 (쉽게 변경 가능)
+# ================================
+
+# API 엔드포인트 설정
+BASE_URL = "http://localhost:8000/api/v1"
+USE_INTENT_ROUTING = True  # True: process_with_intent_routing, False: query_rag
+
+# 테스트 설정
+REQUEST_TIMEOUT = 30  # 요청 타임아웃 (초)
+API_DELAY = 1  # API 호출 간 대기 시간 (초)
+MAX_DISPLAY_SOURCES = 3  # 표시할 최대 소스 문서 수
+
+# 성능 평가 기준
+MEANINGFUL_THRESHOLD = 0.1  # 의미있는 답변 판정 기준 (Precision/Recall)
+PERFORMANCE_GRADE_EXCELLENT = 0.8  # 우수 등급 기준
+PERFORMANCE_GRADE_GOOD = 0.6  # 양호 등급 기준  
+PERFORMANCE_GRADE_FAIR = 0.4  # 보통 등급 기준
+
+# ================================
+
 import requests
 import time
 import math
@@ -20,7 +42,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.rag_test_dataset import dataset, get_dataset_stats
 
-BASE_URL = "http://localhost:8000/api/v1"
+# 동적 엔드포인트 설정
+ENDPOINT = "/process_with_intent_routing" if USE_INTENT_ROUTING else "/query_rag"
 
 class RAGMetrics:
     """RAG 평가 지표 계산 클래스"""
@@ -183,15 +206,16 @@ class QuickTester:
         
         start_time = time.time()
         try:
-            response = requests.post(f"{self.base_url}/query_rag", 
+            response = requests.post(f"{self.base_url}{ENDPOINT}", 
                                    json={"prompt": prompt},
                                    headers={"Content-Type": "application/json"},
-                                   timeout=30)
+                                   timeout=REQUEST_TIMEOUT)
             end_time = time.time()
             
             if response.status_code == 200:
                 data = response.json()
                 print(f"✅ 응답시간: {end_time - start_time:.3f}초")
+                print(f"🏷️ 분류: {data.get('category', 'Unknown')}")
                 print(f"📄 검색된 문서 수: {len(data.get('sources', []))}")
                 print(f"💬 응답: {data.get('response', '')[:100]}...")
                 
@@ -199,7 +223,7 @@ class QuickTester:
                 sources = data.get('sources', [])
                 if sources:
                     print(f"📁 상위 3개 문서:")
-                    for i, source in enumerate(sources[:3], 1):
+                    for i, source in enumerate(sources[:MAX_DISPLAY_SOURCES], 1):
                         print(f"   {i}. {source.get('file_name', 'Unknown')}")
                         if source.get('file_path'):
                             print(f"      경로: {source.get('file_path')}")
@@ -236,17 +260,17 @@ class QuickTester:
             print("💡 서버를 먼저 실행해주세요: python run_server.py --reload")
             return
         
-        # 테스트 케이스들
+        # 테스트 케이스들 (Intent 분류 테스트)
         test_cases = [
-            ("신용대출 금리", "신용대출 관련 질의"),
-            ("KB 주택담보대출", "주택대출 관련 질의"), 
-            ("개인정보보호 정책", "정책 관련 질의"),
-            ("금융소비자보호법", "법규 관련 질의")
+            ("KB 법인 예금담보 임직원대출의 대출한도는 얼마인가요?", "상품 질의 - company_products"),
+            ("여신업무 처리 시 준수해야 할 기본 원칙은 무엇인가요?", "내규 질의 - company_rules"), 
+            ("은행법에서 정하는 여신한도 규제는 어떻게 되나요?", "법률 질의 - industry_policies_and_regulations"),
+            ("금리가 무엇인가요?", "일반 FAQ - general_banking_FAQs")
         ]
         
         for prompt, test_name in test_cases:
             self.test_query(prompt, test_name)
-            time.sleep(1)  # 서버 부하 방지
+            time.sleep(API_DELAY)  # 서버 부하 방지
         
         print("\n" + "=" * 60)
         print("🎯 빠른 테스트 완료!")
@@ -273,9 +297,9 @@ class BasicTester:
         
         try:
             response = requests.post(
-                f"{self.base_url}/query_rag",
+                f"{self.base_url}{ENDPOINT}",
                 json={"prompt": query},
-                timeout=30
+                timeout=REQUEST_TIMEOUT
             )
             
             end_time = time.time()
@@ -287,7 +311,8 @@ class BasicTester:
                     "response_time": end_time - start_time,
                     "result_count": len(data.get("sources", [])),
                     "response": data.get("response", ""),
-                    "sources": data.get("sources", [])
+                    "sources": data.get("sources", []),
+                    "category": data.get("category", "Unknown")
                 }
             else:
                 return {"success": False, "error": f"HTTP {response.status_code}"}
@@ -365,8 +390,9 @@ class BasicTester:
             basic_result = self.test_basic_search(query)
             if basic_result["success"]:
                 basic_analysis = self.analyze_relevance(basic_result["sources"], query)
-                print(f"🔸 기본 검색:")
+                print(f"🔸 Intent 라우팅 검색:")
                 print(f"   응답시간: {basic_result['response_time']:.3f}초")
+                print(f"   분류: {basic_result.get('category', 'Unknown')}")
                 print(f"   결과 수: {basic_result['result_count']}개")
                 print(f"   관련성: {basic_analysis['relevance_score']:.2f}")
                 print(f"   카테고리: {basic_analysis['category_distribution']}")
@@ -387,7 +413,7 @@ class BasicTester:
             
             results.append(basic_result)
             print()
-            time.sleep(1)  # API 부하 방지
+            time.sleep(API_DELAY)  # API 부하 방지
         
         # 전체 결과 요약
         self.print_summary(results)
@@ -442,9 +468,9 @@ class ComprehensiveRAGEvaluator:
         try:
             # RAG 시스템에 질의
             response = requests.post(
-                f"{self.base_url}/query_rag",
+                f"{self.base_url}{ENDPOINT}",
                 json={"prompt": query},
-                timeout=30
+                timeout=REQUEST_TIMEOUT
             )
             
             if response.status_code != 200:
@@ -569,7 +595,7 @@ class ComprehensiveRAGEvaluator:
             result = self.evaluate_single_query(test_case)
             self.results.append(result)
             print("-" * 60)
-            time.sleep(1)  # API 부하 방지
+            time.sleep(API_DELAY)  # API 부하 방지
     
     def calculate_aggregate_metrics(self) -> Dict[str, Any]:
         """전체 평가 지표 집계"""
@@ -588,8 +614,8 @@ class ComprehensiveRAGEvaluator:
         
         for r in http_successful_results:
             # 검색 성능이 낮거나 "해당 정보를 찾을 수 없습니다"인 경우
-            if (r["retrieval_metrics"]["precision_at_5"] < 0.1 or 
-                r["retrieval_metrics"]["recall_at_5"] < 0.1 or
+            if (r["retrieval_metrics"]["precision_at_5"] < MEANINGFUL_THRESHOLD or 
+                r["retrieval_metrics"]["recall_at_5"] < MEANINGFUL_THRESHOLD or
                 "해당 정보를 찾을 수 없습니다" in r.get("generated_answer", "")):
                 no_answer_results.append(r)
             else:
@@ -687,11 +713,11 @@ class ComprehensiveRAGEvaluator:
     
     def _get_performance_grade(self, score: float) -> str:
         """성능 점수를 등급으로 변환"""
-        if score >= 0.8:
+        if score >= PERFORMANCE_GRADE_EXCELLENT:
             return "🌟 우수"
-        elif score >= 0.6:
+        elif score >= PERFORMANCE_GRADE_GOOD:
             return "✅ 양호"
-        elif score >= 0.4:
+        elif score >= PERFORMANCE_GRADE_FAIR:
             return "⚠️ 보통"
         else:
             return "❌ 개선필요"
@@ -703,23 +729,25 @@ def main():
     # 데이터셋 통계
     stats = get_dataset_stats()
     print(f"📊 평가 데이터셋:")
-    print(f"   총 테스트 케이스: {stats['total_cases']}개")
-    print(f"   난이도별: {stats['by_difficulty']}")
-    print(f"   카테고리별: {stats['by_subcategory']}")
+    print(f"   총 테스트 케이스: {stats['total_questions']}개")
+    print(f"   난이도별: {stats['difficulties']}")
+    print(f"   카테고리별: {stats['categories']}")
+    print(f"   서브카테고리별: {stats['subcategories']}")
     
     # 서버 연결 확인
+    print(f"\n🔍 서버 연결 확인 중... ({BASE_URL})")
     try:
         response = requests.get(f"{BASE_URL}/healthcheck", timeout=5)
         if response.status_code != 200:
-            print("\n❌ 서버에 연결할 수 없습니다.")
+            print(f"❌ 서버 응답 오류: {response.status_code}")
             print("💡 서버를 먼저 실행해주세요: python run_server.py --reload")
             return
-    except:
-        print("\n❌ 서버에 연결할 수 없습니다.")
+        else:
+            print("✅ 서버 연결 성공!")
+    except Exception as e:
+        print(f"❌ 서버에 연결할 수 없습니다: {e}")
         print("💡 서버를 먼저 실행해주세요: python run_server.py --reload")
         return
-    
-    print("\n✅ 서버 연결 성공!")
     
     # 테스트 옵션 선택
     print("\n🎮 테스트 옵션:")
@@ -795,9 +823,9 @@ def main():
             
             try:
                 response = requests.post(
-                    f"{BASE_URL}/query_rag",
+                    f"{BASE_URL}{ENDPOINT}",
                     json={"prompt": query},
-                    timeout=30
+                    timeout=REQUEST_TIMEOUT
                 )
                 
                 if response.status_code == 200:
@@ -807,7 +835,7 @@ def main():
                     sources = data.get('sources', [])
                     if sources:
                         print(f"\n📚 참고 문서:")
-                        for i, source in enumerate(sources[:3], 1):
+                        for i, source in enumerate(sources[:MAX_DISPLAY_SOURCES], 1):
                             print(f"   {i}. {source.get('file_name', 'Unknown')}")
                             if source.get('file_path'):
                                 print(f"      경로: {source.get('file_path')}")
@@ -824,4 +852,31 @@ def main():
     print(f"\n🎉 테스트 완료!")
 
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    # 명령행 인수로 자동 실행 지원
+    if len(sys.argv) > 1:
+        auto_option = sys.argv[1]
+        if auto_option == "quick":
+            # 빠른 테스트 자동 실행
+            quick_tester = QuickTester()
+            quick_tester.run_quick_tests()
+        elif auto_option == "full":
+            # 종합 평가 자동 실행
+            print("🚀 전체 데이터셋으로 종합 평가 실행 중...")
+            evaluator = ComprehensiveRAGEvaluator()
+            if not evaluator.check_server():
+                print("❌ 서버에 연결할 수 없습니다.")
+                print("💡 서버를 먼저 실행해주세요: python run_server.py")
+                sys.exit(1)
+            evaluator.run_comprehensive_evaluation(dataset)
+            evaluator.print_comprehensive_report()
+        elif auto_option == "basic":
+            # 기본 테스트 자동 실행
+            basic_tester = BasicTester()
+            basic_tester.run_basic_tests()
+        else:
+            print(f"❌ 알 수 없는 옵션: {auto_option}")
+            print("사용법: python comprehensive_rag_evaluator.py [quick|basic|full]")
+    else:
+        main()
