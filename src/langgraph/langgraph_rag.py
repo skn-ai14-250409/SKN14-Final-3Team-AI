@@ -7,12 +7,14 @@
 
 from typing import Dict, List, Any, TypedDict, Annotated
 import logging
+import re
 from operator import add
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import MessagesState
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.documents import Document
+from pydantic import BaseModel, Field
 
 from src.slm.slm import SLM
 from src.rag.vector_store import VectorStore
@@ -39,6 +41,13 @@ class RAGState(TypedDict):
     context_text: str
     response: str
     sources: List[Dict[str, Any]]
+
+# Pydantic 모델: 함수 내부 중첩 정의를 모듈 수준으로 이동
+class ProductNameResponse(BaseModel):
+    product_name: str = Field(
+        ...,
+        description="질문에서 언급된 KB금융그룹 상품명만 추출하세요. 상품명이 없으면 빈 문자열을 반환하세요."
+    )
     
 class LangGraphRAGWorkflow:
     """LangGraph 기반 실험용 RAG 워크플로우"""
@@ -270,14 +279,6 @@ class LangGraphRAGWorkflow:
     # 기존 orchestrator의 헬퍼 메서드들 복사
     def _extract_product_name_from_question(self, question: str) -> str:
         """질문에서 상품명을 추출하는 메서드 (기존 orchestrator와 동일)"""
-        from pydantic import BaseModel, Field
-        
-        class ProductNameResponse(BaseModel):
-            product_name: str = Field(
-                ...,
-                description="질문에서 언급된 KB금융그룹 상품명만 추출하세요. 상품명이 없으면 빈 문자열을 반환하세요."
-            )
-        
         try:
             extraction_prompt = f"""
                 다음 질문에서 KB금융그룹 상품명만 추출하세요. 답변을 생성하지 말고 상품명만 추출하세요.
@@ -297,8 +298,6 @@ class LangGraphRAGWorkflow:
     
     def _extract_keywords_from_product_name(self, product_name: str) -> List[str]:
         """상품명에서 핵심 키워드 추출 (기존 orchestrator와 동일)"""
-        import re
-        
         keywords = []
         clean_name = product_name.replace("KB", "").strip()
         words = re.findall(r'[가-힣]+', clean_name)
