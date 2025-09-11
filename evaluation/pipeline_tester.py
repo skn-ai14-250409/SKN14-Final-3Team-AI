@@ -39,16 +39,16 @@ class PipelineTester:
             self.use_openai_eval = True
             return True
         try:
-            print("🔍 OpenAI 평가기 초기화 중...")
+            print("OpenAI 평가기 초기화 중...")
             from evaluation.openai_evaluator import OpenAIAnswerEvaluator
-            print("🔍 OpenAIAnswerEvaluator import 성공")
+            print("OpenAIAnswerEvaluator import 성공")
             self.openai_evaluator = OpenAIAnswerEvaluator()
-            print("🔍 OpenAIAnswerEvaluator 인스턴스 생성 성공")
+            print("OpenAIAnswerEvaluator 인스턴스 생성 성공")
             self.use_openai_eval = True
-            print("✅ OpenAI 평가 시스템이 활성화되었습니다.")
+            print("OpenAI 평가 시스템이 활성화되었습니다.")
             return True
         except Exception as e:
-            print(f"❌ OpenAI 평가 시스템 초기화 실패: {e}")
+            print(f"OpenAI 평가 시스템 초기화 실패: {e}")
             import traceback
             print(f"상세 오류: {traceback.format_exc()}")
             self.use_openai_eval = False
@@ -59,6 +59,7 @@ class PipelineTester:
         """OpenAI로 답변 품질 평가. expected_answer가 있으면 비교 평가, 없으면 일반 평가."""
         if not self.use_openai_eval or self.openai_evaluator is None:
             return {}
+        
         try:
             # dataset에서 해당 query의 expected_answer 찾기
             expected_answer = None
@@ -461,9 +462,9 @@ def main():
     
     if eval_choice == "1":
         if tester.enable_openai_eval():
-            print("✅ OpenAI 평가가 활성화되었습니다.")
+            print("OpenAI 평가가 활성화되었습니다.")
         else:
-            print("❌ OpenAI 평가 활성화에 실패했습니다. 평가 없이 진행합니다.")
+            print("OpenAI 평가 활성화에 실패했습니다. 평가 없이 진행합니다.")
     else:
         print("평가 없이 테스트를 진행합니다.")
     
@@ -577,32 +578,33 @@ def main():
         
         # 결과 요약 출력
         if "error" not in result:
-            print(f"✅ 성공: {result.get('response_time', 0)}초")
+            print(f"성공: {result.get('response_time', 0)}초")
             if "sources_count" in result:
-                print(f"📄 소스 문서: {result['sources_count']}개")
+                print(f"소스 문서: {result['sources_count']}개")
             if "category" in result:
-                print(f"🏷️ 카테고리: {result['category']}")
+                print(f"카테고리: {result['category']}")
             
             # OpenAI 평가 결과 출력
             if "openai_eval" in result:
                 eval_data = result["openai_eval"]
                 if "openai_error" in eval_data:
-                    print(f"⚠️ OpenAI 평가 오류: {eval_data['openai_error']}")
+                    print(f"OpenAI 평가 오류: {eval_data['openai_error']}")
                 else:
                     rating = eval_data.get("openai_rating", "Unknown")
                     explanation = eval_data.get("openai_explanation", "")
                     
-                    # 점수에 따른 이모지와 색상
-                    if rating == "Good":
-                        print(f"🎯 OpenAI 평가: 🟢 Good - {explanation}")
-                    elif rating == "Normal":
-                        print(f"🎯 OpenAI 평가: 🟡 Normal - {explanation}")
-                    elif rating == "Bad":
-                        print(f"🎯 OpenAI 평가: 🔴 Bad - {explanation}")
+                    # 점수에 따른 이모지와 색상 (대소문자 구분 없이)
+                    rating_lower = rating.lower()
+                    if rating_lower == "good":
+                        print(f"OpenAI 평가: 🟢 Good - {explanation}")
+                    elif rating_lower == "normal":
+                        print(f"OpenAI 평가: 🟡 Normal - {explanation}")
+                    elif rating_lower == "bad":
+                        print(f"OpenAI 평가: 🔴 Bad - {explanation}")
                     else:
-                        print(f"🎯 OpenAI 평가: {rating} - {explanation}")
+                        print(f"OpenAI 평가: {rating} - {explanation}")
         else:
-            print(f"❌ 오류: {result['error']}")
+            print(f"오류: {result['error']}")
         
         time.sleep(1)  # 서버 부하 방지
     
@@ -623,10 +625,10 @@ def main():
         openai_evaluated = [r for r in successful_tests if "openai_eval" in r["result"]]
         if openai_evaluated:
             print(f"\nOpenAI 평가 통계 ({len(openai_evaluated)}개):")
-            ratings = [r["result"]["openai_eval"].get("openai_rating", "Unknown") for r in openai_evaluated]
-            good_count = ratings.count("Good")
-            normal_count = ratings.count("Normal")
-            bad_count = ratings.count("Bad")
+            ratings = [r["result"]["openai_eval"].get("openai_rating", "Unknown").lower() for r in openai_evaluated]
+            good_count = ratings.count("good")
+            normal_count = ratings.count("normal")
+            bad_count = ratings.count("bad")
             
             print(f"🟢 Good: {good_count}개 ({good_count/len(openai_evaluated)*100:.1f}%)")
             print(f"🟡 Normal: {normal_count}개 ({normal_count/len(openai_evaluated)*100:.1f}%)")
