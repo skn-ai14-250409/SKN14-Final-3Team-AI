@@ -1,24 +1,37 @@
-# PyTorch (CUDA 12.1)
---extra-index-url https://download.pytorch.org/whl/cu121
+# PyTorch (CUDA 12.4 wheels)
+--extra-index-url https://download.pytorch.org/whl/cu124
 torch
 torchvision
 torchaudio
 
-# Hugging Face Libraries
+# Hugging Face
 transformers
 datasets
 accelerate
 huggingface_hub
 
-# Fine-tuning Libraries
+# Finetuning
 peft
 trl==0.12.2
 
-# Performance Optimization
-flash-attn
+# Performance (flash-attn은 나중에 별도 설치)
+bitsandbytes
 
-# (Optional)
+# Optional
 liger-kernel
-
-# (Optional for logging)
 wandb
+
+# # 1) requirements 먼저
+# pip install -r requirements.txt
+
+# # 2) flash-attn은 torch 설치 후, 별도 실행 (환경에 맞춰 커널 빌드)
+# pip uninstall -y ninja && pip install ninja
+# pip install flash-attn==2.3.6 --no-build-isolation
+
+# # 3) 동작 확인
+# python - <<'PY'
+# import torch
+# print("torch:", torch.__version__, "cuda:", torch.version.cuda)
+# import flash_attn
+# print("flash-attn OK")
+# PY
