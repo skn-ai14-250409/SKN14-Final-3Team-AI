@@ -187,7 +187,7 @@ async def answer_with_llm_only(input: LLMOnlyInput):
             response=f"LLM 답변 생성 중 오류가 발생했습니다: {str(e)}"
         )
 
-@router.post("/experimental/langgraph_rag")
+@router.post("/langgraph/langgraph_rag")
 async def experimental_langgraph_rag(input: QueryRagInput):
     """
     실험용 LangGraph RAG 엔드포인트
@@ -201,13 +201,14 @@ async def experimental_langgraph_rag(input: QueryRagInput):
         workflow = get_langgraph_workflow()
         result = workflow.run_workflow(input.prompt)
         
-        return {
-            "status": STATUS_SUCCESS,
+        return { #result["response"] # 원래 코드 {
+            # "status": STATUS_SUCCESS,
             "response": result["response"],
-            "sources": result["sources"],
+            # "sources": result["sources"],
             "category": result["category"],
-            "experimental": True,
-            "workflow_type": "langgraph"
+            # "experimental": True,
+            "key_facts": result.get("key_facts", {}),
+            # "workflow_type": "langgraph"
         }
     except Exception as e:
         logger.error(f"[EXPERIMENTAL] LangGraph RAG failed: {e}")
