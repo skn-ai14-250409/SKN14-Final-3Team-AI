@@ -27,7 +27,7 @@ evaluation/
 #### **사용 시나리오**:
 ```bash
 # 성능 평가 (대화형 메뉴)
-python evaluation/performance_evaluator.py
+python evaluation/performance_evaluator
 
 # 메뉴 옵션:
 # 1. 빠른 테스트 (4개)
