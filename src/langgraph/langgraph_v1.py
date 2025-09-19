@@ -8,17 +8,37 @@
 from typing import Dict, List, Any, TypedDict, Annotated
 import logging
 import re
+import time
+import uuid
+from datetime import datetime
 from operator import add
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import MessagesState
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage, AIMessage
 from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from src.slm.slm import SLM
 from src.rag.vector_store import VectorStore
 from src.intent_router import IntentRouter
+from src.langgraph.session_manager import session_manager, ConversationTurn, SessionContext
+try:
+    from src.config.keyword_mappings import (
+        get_expansion_patterns,
+        get_synonym_mappings,
+        get_financial_terms,
+        get_keyword_weights
+    )
+except ImportError:
+    # 설정 파일이 없는 경우 기본값 사용
+    def get_expansion_patterns():
+        return {}
+    def get_synonym_mappings():
+        return {}
+    def get_financial_terms():
+        return {}
+    def get_keyword_weights():
+        return {}
 from src.constants import (
     NO_ANSWER_MSG,
     MAIN_LAW, MAIN_RULE, MAIN_PRODUCT,
@@ -30,6 +50,221 @@ from src.constants import (
 
 logger = logging.getLogger(__name__)
 
+# 간단한 로깅 헬퍼 함수
+def log_node_start(node_name: str, session_id: str = None):
+    """노드 시작 로깅"""
+    logger.info(f"[GRAPH] {node_name} started - session_id: {session_id or 'unknown'}")
+
+def log_node_complete(node_name: str, session_id: str = None):
+    """노드 완료 로깅"""
+    logger.info(f"[GRAPH] {node_name} completed - session_id: {session_id or 'unknown'}")
+
+# 공통 유틸리티 클래스
+class RAGUtils:
+    """RAG 관련 공통 유틸리티 메서드들"""
+    
+    # 공통 불용어 리스트
+    STOP_WORDS = {
+        "은", "는", "이", "가", "을", "를", "에", "의", "로", "으로", "도", "만", 
+        "부터", "까지", "에서", "에게", "한테", "와", "과", "뭐", "있어", "있나", 
+        "알려", "주세요", "안내", "정보", "어떻게", "무엇", "언제", "어디", "왜"
+    }
+    
+    @staticmethod
+    def extract_keywords_from_query(query: str) -> List[str]:
+        """질문에서 핵심 키워드 추출 (최적화된 버전)"""
+        try:
+            # 한글, 영문, 숫자만 추출
+            words = re.findall(r'[가-힣a-zA-Z0-9]+', query)
+            
+            # 불용어 제거 및 길이 필터링
+            keywords = [word for word in words 
+                       if len(word) > 1 and word not in RAGUtils.STOP_WORDS]
+            
+            return keywords
+        except Exception as e:
+            logger.error(f"[UTILS] Error extracting keywords from query: {e}")
+            return []
+
+    @staticmethod
+    def extract_keywords_from_filename(filename: str) -> List[str]:
+        """파일명에서 키워드 자동 추출 (최적화된 버전)"""
+        try:
+            # 파일명 정리 (확장자 제거, 언더스코어/공백 처리)
+            clean_name = filename.replace(".pdf", "").replace("KB_", "").replace("_", " ")
+
+            # 한글, 영문, 숫자만 추출
+            keywords = re.findall(r'[가-힣a-zA-Z0-9]+', clean_name)
+
+            # 불용어 제거 및 길이 필터링
+            keywords = [kw for kw in keywords 
+                       if len(kw) > 1 and kw not in RAGUtils.STOP_WORDS]
+
+            return keywords
+        except Exception as e:
+            logger.error(f"[UTILS] Error extracting keywords from filename: {e}")
+            return []
+
+    @staticmethod
+    def calculate_keyword_match_score(query_keywords: List[str], file_keywords: List[str]) -> float:
+        """키워드 매칭 점수 계산 (통합된 버전)"""
+        try:
+            if not query_keywords or not file_keywords:
+                return 0.0
+            
+            # 가중치 기반 점수 계산 사용
+            return RAGUtils.calculate_weighted_keyword_score(query_keywords, file_keywords)
+        except Exception as e:
+            logger.error(f"[UTILS] Error calculating keyword match score: {e}")
+            return 0.0
+
+    @staticmethod
+    def extract_keywords_from_product_name(product_name: str) -> List[str]:
+        """상품명에서 핵심 키워드 추출 (동적 방식)"""
+        keywords = []
+        clean_name = product_name.replace("KB", "").strip()
+        
+        # 1. 기본 단어 추출
+        words = re.findall(r'[가-힣]+', clean_name)
+        for word in words:
+            if len(word) > 1:
+                keywords.append(word)
+        
+        # 2. 동적 키워드 확장 (하드코딩 대신 패턴 기반)
+        expanded_keywords = RAGUtils._expand_keywords_dynamically(keywords, product_name)
+        keywords.extend(expanded_keywords)
+        
+        return list(set(keywords))
+    
+    @staticmethod
+    def _expand_keywords_dynamically(base_keywords: List[str], product_name: str) -> List[str]:
+        """동적으로 키워드를 확장하는 메서드 (설정 파일 기반)"""
+        expanded = []
+        
+        # 설정 파일에서 패턴 가져오기
+        expansion_patterns = get_expansion_patterns()
+        synonym_mappings = get_synonym_mappings()
+        
+        # 1. 패턴 기반 키워드 확장
+        for pattern, related_terms in expansion_patterns.items():
+            if re.search(pattern, product_name):
+                expanded.extend(related_terms)
+        
+        # 2. 유사어/동의어 확장
+        for keyword in base_keywords:
+            if keyword in synonym_mappings:
+                expanded.extend(synonym_mappings[keyword])
+        
+        # 3. 금융 도메인 특화 키워드 추가
+        financial_terms = get_financial_terms()
+        for keyword in base_keywords:
+            if keyword in financial_terms:
+                expanded.extend(financial_terms[keyword])
+        
+        return expanded
+    
+    @staticmethod
+    def calculate_weighted_keyword_score(query_keywords: List[str], file_keywords: List[str]) -> float:
+        """가중치를 적용한 키워드 매칭 점수 계산"""
+        try:
+            if not query_keywords or not file_keywords:
+                return 0.0
+            
+            keyword_weights = get_keyword_weights()
+            total_score = 0.0
+            matched_count = 0
+            
+            for q_kw in query_keywords:
+                # 정확한 매칭
+                if q_kw in file_keywords:
+                    weight = keyword_weights.get(q_kw, 0.5)  # 기본 가중치 0.5
+                    total_score += weight * 1.0
+                    matched_count += 1
+                
+                # 부분 매칭
+                for f_kw in file_keywords:
+                    if q_kw in f_kw or f_kw in q_kw:
+                        weight = keyword_weights.get(q_kw, 0.3)  # 부분 매칭은 낮은 가중치
+                        total_score += weight * 0.3
+                        matched_count += 1
+                        break  # 중복 계산 방지
+            
+            # 정규화 (매칭된 키워드 수로 나누기)
+            return total_score / len(query_keywords) if query_keywords else 0.0
+            
+        except Exception as e:
+            logger.error(f"[UTILS] Error calculating weighted keyword score: {e}")
+            return 0.0
+
+    @staticmethod
+    def normalize_retrieved(items) -> List[Document]:
+        """검색 결과 정규화"""
+        norm = []
+        for it in items or []:
+            if isinstance(it, Document):
+                norm.append(it)
+            elif isinstance(it, str):
+                norm.append(Document(page_content=it, metadata={"source_type": "raw_text"}))
+            elif isinstance(it, dict):
+                text = it.get("page_content") or it.get("text") or it.get("content") or ""
+                meta = it.get("metadata") or {}
+                norm.append(Document(page_content=text, metadata=meta))
+            else:
+                norm.append(Document(page_content=str(it), metadata={"source_type": "unknown"}))
+        return norm
+
+    @staticmethod
+    def format_context(docs) -> str:
+        """컨텍스트 포맷"""
+        lines = []
+        for d in docs:
+            meta = d.metadata or {}
+            src = meta.get("relative_path") or meta.get("file_name") or meta.get("source_type") or "unknown_source"
+            snippet = (d.page_content or "").strip()
+            if not snippet:
+                continue
+            lines.append(f"[source: {src}]\n{snippet}")
+        return "\n---\n".join(lines)
+
+    @staticmethod
+    def filter_by_relevance_score(docs: List[Document], query: str) -> List[Document]:
+        """관련성 필터링"""
+        if not docs:
+            return docs
+
+        query_words = set(query.lower().split())
+        scored_docs = []
+
+        for doc in docs:
+            content = (doc.page_content or "").lower()
+            metadata = doc.metadata or {}
+
+            score = 1.0
+
+            # 키워드 매칭 보너스
+            content_words = set(content.split())
+            keyword_overlap = len(query_words.intersection(content_words))
+            score += keyword_overlap * 0.1
+
+            # 메타데이터 키워드 매칭 보너스
+            metadata_keywords = metadata.get("keywords", [])
+            for keyword in metadata_keywords:
+                if keyword.lower() in query.lower():
+                    score += 0.2
+
+            # 파일명 매칭 보너스
+            file_name = metadata.get("file_name", "").lower()
+            for word in query_words:
+                if word in file_name:
+                    score += 0.3
+
+            scored_docs.append((score, doc))
+
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        min_score = 1.0
+        filtered_docs = [doc for score, doc in scored_docs if score >= min_score]
+
+        return filtered_docs[:5]
 # LangGraph State 정의
 class RAGState(TypedDict):
     """RAG 워크플로우의 상태를 관리하는 클래스"""
@@ -41,9 +276,9 @@ class RAGState(TypedDict):
     context_text: str
     response: str
     sources: List[Dict[str, Any]]
-    is_first_question: bool  # 첫 턴 전처리용 상태 필드
-    initial_intent: str
-    initial_topic_summary: str  # 세션 제목(요약) 저장용
+    session_context: SessionContext  # 멀티턴 세션 컨텍스트
+    conversation_history: List[ConversationTurn]  # 대화 히스토리
+    turn_id: str  # 현재 턴 ID
 
 # Pydantic 모델: 함수 내부 중첩 정의를 모듈 수준으로 이동
 class ProductNameResponse(BaseModel):
@@ -60,23 +295,40 @@ class LangGraphRAGWorkflow:
         self.vector_store = VectorStore()
         self.router = IntentRouter()
         self.workflow = self._build_workflow()
+        # 성능 최적화를 위한 캐시
+        self._filename_cache = None
+        self._filename_index = None
 
     def _build_workflow(self) -> StateGraph:
-        """LangGraph 워크플로우 구축"""
+        """LangGraph 워크플로우 구축 (멀티턴 대화 지원)"""
         workflow = StateGraph(RAGState)
 
         # 노드 추가
-        workflow.add_node("first_turn_preprocess", self._first_turn_preprocess)  # ✅ 추가
+        workflow.add_node("session_init", self._session_init)  # 세션 초기화
+        workflow.add_node("context_analysis", self._context_analysis)  # 맥락 분석
+        workflow.add_node("first_turn_preprocess", self._first_turn_preprocess)  # 첫 턴 전처리
         workflow.add_node("classify_intent", self._classify_intent)
         workflow.add_node("handle_general_faq", self._handle_general_faq)
         workflow.add_node("extract_product_name", self._extract_product_name)
         workflow.add_node("search_documents", self._search_documents)
         workflow.add_node("filter_relevance", self._filter_relevance)
         workflow.add_node("generate_response", self._generate_response)
+        workflow.add_node("save_conversation", self._save_conversation)  # 대화 저장
 
-        # 엣지 추가 (조건부 라우팅)
-        workflow.add_edge(START, "first_turn_preprocess")        # ✅ START → 첫 턴 전처리
-        workflow.add_edge("first_turn_preprocess", "classify_intent")  # ✅ 전처리 후 인텐트 분류
+        # 엣지 추가 (멀티턴 대화 플로우)
+        workflow.add_edge(START, "session_init")
+        workflow.add_edge("session_init", "context_analysis")
+        
+        workflow.add_conditional_edges(
+            "context_analysis",
+            self._route_by_context,
+            {
+                "first_turn": "first_turn_preprocess",
+                "continue_turn": "classify_intent"
+            }
+        )
+        
+        workflow.add_edge("first_turn_preprocess", "classify_intent")
 
         workflow.add_conditional_edges(
             "classify_intent",
@@ -87,31 +339,219 @@ class LangGraphRAGWorkflow:
             }
         )
 
-        workflow.add_edge("handle_general_faq", END)
+        workflow.add_edge("handle_general_faq", "save_conversation")
         workflow.add_edge("extract_product_name", "search_documents")
         workflow.add_edge("search_documents", "filter_relevance")
         workflow.add_edge("filter_relevance", "generate_response")
-        workflow.add_edge("generate_response", END)
+        workflow.add_edge("generate_response", "save_conversation")
+        workflow.add_edge("save_conversation", END)
 
         return workflow.compile()
 
+    def _session_init(self, state: RAGState) -> RAGState:
+        """세션 초기화 및 관리"""
+        try:
+            session_id = state.get("session_context", {}).session_id if state.get("session_context") else None
+            log_node_start("session_init", session_id)
+            
+            if not session_id:
+                # 새 세션 생성
+                session_context = session_manager.create_session()
+                logger.info(f"[GRAPH] Created new session: {session_context.session_id}")
+            else:
+                # 기존 세션 조회
+                session_context = session_manager.get_session(session_id)
+                if not session_context:
+                    # 세션이 만료되었거나 없으면 새로 생성
+                    session_context = session_manager.create_session(session_id)
+                    logger.info(f"[GRAPH] Recreated expired session: {session_id}")
+                else:
+                    logger.info(f"[GRAPH] Retrieved existing session: {session_id}")
+            
+            # 턴 ID 생성
+            turn_id = f"turn_{int(time.time())}_{hash(str(time.time())) % 10000}"
+            
+            result = {
+                **state,
+                "session_context": session_context,
+                "turn_id": turn_id,
+                "conversation_history": session_manager.get_conversation_history(session_context.session_id, limit=5)
+            }
+            log_node_complete("session_init", session_context.session_id)
+            return result
+            
+        except Exception as e:
+            logger.error(f"[GRAPH] Session init failed: {e}")
+            # 폴백: 기본 세션 생성
+            session_context = session_manager.create_session()
+            return {
+                **state,
+                "session_context": session_context,
+                "turn_id": f"turn_{int(time.time())}",
+                "conversation_history": []
+            }
+
+    def _context_analysis(self, state: RAGState) -> RAGState:
+        """대화 맥락 분석 및 라우팅 결정"""
+        try:
+            session_context = state.get("session_context")
+            conversation_history = state.get("conversation_history", [])
+            query = state.get("query", "")
+            
+            if not session_context:
+                return {**state, "context_route": "first_turn"}
+            
+            # 첫 턴인지 확인
+            if not conversation_history:
+                logger.info(f"[GRAPH] First turn detected for session: {session_context.session_id}")
+                return {**state, "context_route": "first_turn"}
+            
+            # 이전 대화 맥락 분석
+            last_turn = conversation_history[-1]
+            
+            # 맥락 기반 의도 분석
+            context_intent = self._analyze_context_intent(query, last_turn, session_context)
+            
+            # 세션 컨텍스트 업데이트
+            session_manager.update_session(
+                session_context.session_id,
+                current_topic=self._extract_current_topic(query, last_turn),
+                conversation_summary=session_manager.generate_conversation_summary(session_context.session_id)
+            )
+            
+            logger.info(f"[GRAPH] Context analysis completed. Route: continue_turn, Intent: {context_intent}")
+            return {
+                **state,
+                "context_route": "continue_turn",
+                "context_intent": context_intent
+            }
+            
+        except Exception as e:
+            logger.error(f"[GRAPH] Context analysis failed: {e}")
+            return {**state, "context_route": "first_turn"}
+
+    def _analyze_context_intent(self, query: str, last_turn: ConversationTurn, session_context: SessionContext) -> str:
+        """맥락 기반 의도 분석"""
+        try:
+            # 이전 대화와의 연관성 분석
+            context_prompt = f"""
+            이전 대화:
+            Q: {last_turn.user_query}
+            A: {last_turn.ai_response[:200]}...
+            
+            현재 질문: {query}
+            
+            현재 질문이 이전 대화와 어떤 관련이 있는지 분석해주세요:
+            1. follow_up: 이전 질문에 대한 추가 질문이나 세부사항
+            2. related: 같은 주제의 새로운 질문
+            3. new_topic: 완전히 새로운 주제
+            4. clarification: 이전 답변에 대한 명확화 요청
+            
+            답변 형식: [의도] - [간단한 설명]
+            """
+            
+            response = self.slm.generate_response(context_prompt)
+            
+            if "follow_up" in response.lower():
+                return "follow_up"
+            elif "related" in response.lower():
+                return "related"
+            elif "new_topic" in response.lower():
+                return "new_topic"
+            else:
+                return "clarification"
+                
+        except Exception as e:
+            logger.error(f"[GRAPH] Context intent analysis failed: {e}")
+            return "related"
+
+    def _extract_current_topic(self, query: str, last_turn: ConversationTurn) -> str:
+        """현재 토픽 추출"""
+        try:
+            # 간단한 키워드 기반 토픽 추출
+            keywords = RAGUtils.extract_keywords_from_query(query)
+            if keywords:
+                return " ".join(keywords[:3])  # 상위 3개 키워드
+            
+            # 이전 토픽과의 연관성 확인
+            if last_turn.product_name:
+                return last_turn.product_name
+            
+            return query[:50] + "..." if len(query) > 50 else query
+            
+        except Exception as e:
+            logger.error(f"[GRAPH] Topic extraction failed: {e}")
+            return query[:30] + "..." if len(query) > 30 else query
+
+    def _route_by_context(self, state: RAGState) -> str:
+        """맥락 기반 라우팅"""
+        return state.get("context_route", "first_turn")
+
+    def _save_conversation(self, state: RAGState) -> RAGState:
+        """대화 턴 저장"""
+        try:
+            session_context = state.get("session_context")
+            turn_id = state.get("turn_id")
+            
+            if not session_context or not turn_id:
+                return state
+            
+            # 대화 턴 생성
+            conversation_turn = ConversationTurn(
+                turn_id=turn_id,
+                timestamp=datetime.now(),
+                user_query=state.get("query", ""),
+                ai_response=state.get("response", ""),
+                category=state.get("category", ""),
+                product_name=state.get("product_name", ""),
+                sources=state.get("sources", []),
+                session_context=session_context.to_dict()
+            )
+            
+            # 세션 매니저에 저장
+            session_manager.add_conversation_turn(session_context.session_id, conversation_turn)
+            
+            # 메시지 히스토리에 추가
+            session_manager.add_message(session_context.session_id, HumanMessage(content=state.get("query", "")))
+            session_manager.add_message(session_context.session_id, AIMessage(content=state.get("response", "")))
+            
+            logger.info(f"[GRAPH] Saved conversation turn: {turn_id}")
+            return state
+            
+        except Exception as e:
+            logger.error(f"[GRAPH] Save conversation failed: {e}")
+            return state
+
     def _first_turn_preprocess(self, state: RAGState) -> RAGState:
-        """세션의 첫 질문에 대해서만 실행되는 전처리 노드(최소 예외 처리).
+        """세션의 첫 질문에 대해서만 실행되는 전처리 노드(강화된 예외 처리).
 
         동작:
-        - 세션 첫 질문인지 확인 (is_first_question)
-        - router로 intent 획득(initial_intent) — 오류는 상위로 전달
+        - 세션 첫 질문인지 확인 (conversation_history)
+        - router로 intent 획득(initial_intent) — 안전한 예외 처리
         - SLM으로 챗봇 세션용 짧은 제목 생성(initial_topic_summary)
           (SLM 호출 실패에 대해서만 최소 폴백 처리)
-        - is_first_question을 False로 설정하고 상태 반환
         """
-        # 이미 처리되었다면 그대로 반환 (세션 내 1회 실행)
-        if not state.get("is_first_question", True):
+        # 세션 컨텍스트 확인
+        session_context = state.get("session_context")
+        conversation_history = state.get("conversation_history", [])
+        
+        # 이미 대화가 있었다면 그대로 반환 (세션 내 1회 실행)
+        if conversation_history:
             return state
 
         query = state.get("query", "") or ""
-        # router 호출에 대한 try/except는 제거 — 오류는 상위로 전달되어야 디버깅에 유리
-        initial_intent = (self.router.route_prompt(query) or "").strip()
+        
+        # Router 호출 - 안전한 예외 처리
+        try:
+            initial_intent = self.router.route_prompt(query)
+            if not initial_intent or not initial_intent.strip():
+                logger.warning(f"[GRAPH] Router returned empty intent for query: {query[:100]}...")
+                initial_intent = "unknown"
+            else:
+                initial_intent = initial_intent.strip()
+        except Exception as e:
+            logger.error(f"[GRAPH] Router failed for query '{query[:100]}...': {e}")
+            initial_intent = "unknown"
 
         # 제목 생성: LLM 호출만 한 번의 예외 처리 (운영상 폴백 허용)
         system_message = SystemMessage(
@@ -144,22 +584,39 @@ class LangGraphRAGWorkflow:
             # LLM 실패 또는 빈 결과일 때 폴백: intent 우선, 없으면 질문 앞부분
             session_title = initial_intent or (query.strip().splitlines()[0][:MAX_TITLE_CHARS] or "새로운 질문")
 
+        # 세션 컨텍스트 업데이트
+        if session_context:
+            session_manager.update_session(
+                session_context.session_id,
+                initial_intent=initial_intent,
+                session_title=session_title
+            )
+        
         logger.info(
-            f"[GRAPH] First-turn preprocess done. intent={initial_intent!r}, session_title={session_title!r}"
+            f"[GRAPH] First-turn preprocess done. session_id={session_context.session_id if session_context else 'unknown'}, "
+            f"intent={initial_intent!r}, session_title={session_title!r}"
         )
 
         return {
             **state,
-            "is_first_question": False,
             "initial_intent": initial_intent,
-            # 기존 필드명(initial_topic_summary)을 세션 제목 저장 용도로 재사용
             "initial_topic_summary": session_title,
         }
 
     def _classify_intent(self, state: RAGState) -> RAGState:
-        """인텐트 분류 노드"""
+        """인텐트 분류 노드 - 강화된 에러 처리"""
         query = state["query"]
-        category = self.router.route_prompt(query)
+        
+        try:
+            category = self.router.route_prompt(query)
+            if not category or not category.strip():
+                logger.warning(f"[GRAPH] Router returned empty category for query: {query[:100]}...")
+                category = "unknown"
+            else:
+                category = category.strip()
+        except Exception as e:
+            logger.error(f"[GRAPH] Intent classification failed for query '{query[:100]}...': {e}")
+            category = "unknown"
 
         logger.info(f"[GRAPH] Classified category: {category}")
 
@@ -180,7 +637,7 @@ class LangGraphRAGWorkflow:
             return "rag_needed"  # 기본적으로 RAG 사용
 
     def _handle_general_faq(self, state: RAGState) -> RAGState:
-        """일반 FAQ 처리 노드"""
+        """일반 FAQ 처리 노드 - 강화된 에러 처리"""
         query = state["query"]
 
         # 일반 FAQ용 시스템 메시지
@@ -194,7 +651,15 @@ class LangGraphRAGWorkflow:
 5) 항상 정중하고 도움이 되는 어조로 답변하세요.
 6) 답변은 5줄 이내로 간결하게 작성하세요.""")
         messages = [system_message, HumanMessage(query)]
-        response = self.slm.invoke(messages)
+        
+        try:
+            response = self.slm.invoke(messages)
+            if not response or not response.strip():
+                logger.warning(f"[GRAPH] SLM returned empty response for general FAQ")
+                response = "죄송합니다. 현재 답변을 생성할 수 없습니다. 다시 시도해 주세요."
+        except Exception as e:
+            logger.error(f"[GRAPH] SLM failed for general FAQ: {e}")
+            response = "죄송합니다. 현재 답변을 생성할 수 없습니다. 다시 시도해 주세요."
 
         logger.info(f"[GRAPH] General FAQ response generated")
 
@@ -228,7 +693,7 @@ class LangGraphRAGWorkflow:
 
         # 1차: 질문 키워드로 정확한 파일명 매칭 (최우선)
         try:
-            query_keywords = self._extract_keywords_from_query(query)
+            query_keywords = RAGUtils.extract_keywords_from_query(query)
             exact_filename = self._find_exact_filename_match(query_keywords)
 
             if exact_filename:
@@ -247,7 +712,7 @@ class LangGraphRAGWorkflow:
 
                 if not raw_retrieved:
                     # 2차: 키워드 검색
-                    keywords = self._extract_keywords_from_product_name(product_name)
+                    keywords = RAGUtils.extract_keywords_from_product_name(product_name)
                     raw_retrieved = self.vector_store.similarity_search_by_keywords(query, keywords)
 
                     if not raw_retrieved:
@@ -272,7 +737,7 @@ class LangGraphRAGWorkflow:
                 raw_retrieved = self.vector_store.similarity_search(query)
 
         # 문서 정규화
-        retrieved_docs = self._normalize_retrieved(raw_retrieved)
+        retrieved_docs = RAGUtils.normalize_retrieved(raw_retrieved)
 
         logger.info(f"[GRAPH] Retrieved {len(retrieved_docs)} documents")
 
@@ -282,105 +747,48 @@ class LangGraphRAGWorkflow:
         }
 
     def _find_exact_filename_match(self, query_keywords: List[str]) -> str:
-        """질문 키워드로 정확한 파일명 찾기 (동적 방식)"""
+        """질문 키워드로 정확한 파일명 찾기 (단순화된 방식)"""
         try:
-            # 파일명에서 자동으로 키워드 추출
-            available_files = self.vector_store.get_available_files()
+            # 캐시된 파일명 인덱스 사용
+            if self._filename_index is None:
+                self._build_filename_index()
 
-            if not available_files:
-                logger.warning("[GRAPH] No available files found")
+            if not self._filename_index:
                 return ""
 
             best_match = ""
             max_score = 0.0
-            min_threshold = 0.3  # 최소 임계값 설정
+            min_threshold = 0.3
 
-            for filename in available_files:
-                try:
-                    # 파일명에서 키워드 자동 추출
-                    file_keywords = self._extract_keywords_from_filename(filename)
+            # 간단한 매칭 로직
+            for filename, file_keywords in self._filename_index.items():
+                score = RAGUtils.calculate_keyword_match_score(query_keywords, file_keywords)
+                if score > max_score and score >= min_threshold:
+                    max_score = score
+                    best_match = filename
 
-                    # 질문 키워드와 매칭 점수 계산
-                    score = self._calculate_keyword_match_score(query_keywords, file_keywords)
-
-                    if score > max_score and score >= min_threshold:
-                        max_score = score
-                        best_match = filename
-
-                except Exception as e:
-                    logger.error(f"[GRAPH] Error processing filename {filename}: {e}")
-                    continue
-
-            logger.info(f"[GRAPH] Best filename match: {best_match} (score: {max_score:.2f})")
             return best_match if max_score >= min_threshold else ""
 
         except Exception as e:
             logger.error(f"[GRAPH] Error in filename matching: {e}")
             return ""
 
-    def _extract_keywords_from_query(self, query: str) -> List[str]:
-        """질문에서 핵심 키워드 추출"""
+    def _build_filename_index(self) -> None:
+        """파일명 인덱스 구축 (단순화된 버전)"""
         try:
-            keywords = []
-            words = query.split()
+            available_files = self.vector_store.get_available_files()
+            if not available_files:
+                self._filename_index = {}
+                return
 
-            # 불용어 제거
-            stop_words = ["은", "는", "이", "가", "을", "를", "에", "의", "로", "으로", "는", "도", "만", "부터", "까지", "에서", "에게", "한테", "와", "과", "의", "가", "이", "을", "를", "에", "에서", "로", "으로", "부터", "까지", "만", "도", "는", "은", "이", "가", "을", "를", "에", "의", "로", "으로", "뭐", "있어", "있나", "알려", "주세요", "안내", "정보"]
+            self._filename_index = {
+                filename: RAGUtils.extract_keywords_from_filename(filename)
+                for filename in available_files
+            }
 
-            for word in words:
-                if len(word) > 1 and word not in stop_words:
-                    keywords.append(word)
-
-            return keywords
         except Exception as e:
-            logger.error(f"[GRAPH] Error extracting keywords from query: {e}")
-            return []
-
-    def _extract_keywords_from_filename(self, filename: str) -> List[str]:
-        """파일명에서 키워드 자동 추출"""
-        try:
-            # 파일명 정리 (확장자 제거, 언더스코어/공백 처리)
-            clean_name = filename.replace(".pdf", "").replace("KB_", "").replace("_", " ")
-
-            # 한글, 영문, 숫자만 추출
-            keywords = re.findall(r'[가-힣a-zA-Z0-9]+', clean_name)
-
-            # 길이가 1인 단어 제거
-            keywords = [kw for kw in keywords if len(kw) > 1]
-
-            return keywords
-        except Exception as e:
-            logger.error(f"[GRAPH] Error extracting keywords from filename: {e}")
-            return []
-
-    def _calculate_keyword_match_score(self, query_keywords: List[str], file_keywords: List[str]) -> float:
-        """키워드 매칭 점수 계산 (개선된 버전)"""
-        try:
-            if not query_keywords or not file_keywords:
-                return 0.0
-
-            # 정확한 매칭 (가장 높은 점수)
-            exact_matches = len(set(query_keywords) & set(file_keywords))
-
-            # 부분 매칭 (포함 관계) - 중복 계산 방지
-            partial_matches = 0
-            matched_query_words = set()
-
-            for q_kw in query_keywords:
-                for f_kw in file_keywords:
-                    if q_kw in f_kw or f_kw in q_kw:
-                        if q_kw not in matched_query_words:  # 중복 방지
-                            partial_matches += 0.3
-                            matched_query_words.add(q_kw)
-
-            # 가중치 적용
-            total_score = exact_matches * 1.0 + partial_matches * 0.3
-
-            # 정규화 (질문 키워드 수로 나누기)
-            return total_score / len(query_keywords) if query_keywords else 0.0
-        except Exception as e:
-            logger.error(f"[GRAPH] Error calculating keyword match score: {e}")
-            return 0.0
+            logger.error(f"[GRAPH] Error building filename index: {e}")
+            self._filename_index = {}
 
 # ----------------------------------------------------------------------------------------------------------------------------
 
@@ -389,8 +797,8 @@ class LangGraphRAGWorkflow:
         docs = state["retrieved_docs"]
         query = state["query"]
 
-        filtered_docs = self._filter_by_relevance_score(docs, query)
-        context_text = self._format_context(filtered_docs)
+        filtered_docs = RAGUtils.filter_by_relevance_score(docs, query)
+        context_text = RAGUtils.format_context(filtered_docs)
 
         logger.info(f"[GRAPH] Filtered to {len(filtered_docs)} relevant documents")
 
@@ -439,35 +847,65 @@ class LangGraphRAGWorkflow:
             "sources": sources
         }
 
-    def run_workflow(self, query: str) -> Dict[str, Any]:
-        """워크플로우 실행"""
-        initial_state = RAGState(
-            messages=[],
-            query=query,
-            category="",
-            product_name="",
-            retrieved_docs=[],
-            context_text="",
-            response="",
-            sources=[],
-            # ✅ 첫 턴 전처리 관련 초기값
-            is_first_question=True,
-            initial_intent="",
-            initial_topic_summary="",
-        )
-
+    def run_workflow(self, query: str, session_id: str = None) -> Dict[str, Any]:
+        """멀티턴 대화 지원 워크플로우 실행"""
         try:
+            # 기존 세션 조회 또는 새 세션 생성
+            if session_id:
+                session_context = session_manager.get_session(session_id)
+                if not session_context:
+                    session_context = session_manager.create_session(session_id)
+            else:
+                session_context = session_manager.create_session()
+            
+            # 초기 상태 설정 (멀티턴 지원)
+            initial_state = {
+                "messages": [],
+                "query": query,
+                "category": "",
+                "product_name": "",
+                "retrieved_docs": [],
+                "context_text": "",
+                "response": "",
+                "sources": [],
+                "session_context": session_context,
+                "conversation_history": [],
+                "turn_id": "",
+            }
+
+            # 워크플로우 실행
             final_state = self.workflow.invoke(initial_state)
 
-            return {
+            # 세션 컨텍스트 업데이트
+            updated_session = final_state.get("session_context")
+            if updated_session:
+                session_manager.update_session(
+                    updated_session.session_id,
+                    last_activity=datetime.now()
+                )
+
+            # 응답 구성
+            response_data = {
                 "response": final_state["response"],
                 "sources": final_state["sources"],
                 "category": final_state.get("category", "unknown"),
                 "product_name": final_state.get("product_name", ""),
-                # ✅ 참고용 반환
+                "session_info": {
+                    "session_id": updated_session.session_id if updated_session else session_context.session_id,
+                    "initial_intent": final_state.get("initial_intent", ""),
+                    "initial_topic_summary": final_state.get("initial_topic_summary", ""),
+                    "conversation_mode": updated_session.conversation_mode if updated_session else "normal",
+                    "current_topic": updated_session.current_topic if updated_session else "",
+                    "active_product": updated_session.active_product if updated_session else "",
+                },
+                # 호환성 유지
                 "initial_intent": final_state.get("initial_intent", ""),
                 "initial_topic_summary": final_state.get("initial_topic_summary", ""),
             }
+            
+            logger.info(f"[GRAPH] Workflow completed for session: {session_context.session_id}")
+            return response_data
+            
         except Exception as e:
             logger.error(f"[GRAPH] Workflow execution failed: {e}")
             return {
@@ -475,6 +913,14 @@ class LangGraphRAGWorkflow:
                 "sources": [],
                 "category": "error",
                 "product_name": "",
+                "session_info": {
+                    "session_id": session_id or "error",
+                    "initial_intent": "",
+                    "initial_topic_summary": "",
+                    "conversation_mode": "error",
+                    "current_topic": "",
+                    "active_product": "",
+                },
                 "initial_intent": "",
                 "initial_topic_summary": "",
             }
@@ -504,96 +950,6 @@ class LangGraphRAGWorkflow:
             logger.error(f"[GRAPH] Failed to extract product name: {e}")
             return ""
 
-    def _extract_keywords_from_product_name(self, product_name: str) -> List[str]:
-        """상품명에서 핵심 키워드 추출 (기존 orchestrator와 동일)"""
-        keywords = []
-        clean_name = product_name.replace("KB", "").strip()
-        words = re.findall(r'[가-힣]+', clean_name)
-
-        for word in words:
-            if len(word) > 1:
-                keywords.append(word)
-
-        keyword_mapping = {
-            "동반성장협약": ["동반성장", "협약", "상생"],
-            "상생대출": ["상생", "대출"],
-            "닥터론": ["닥터론"],
-            "스마트론": ["스마트론"],
-            "햇살론": ["햇살론"]
-        }
-
-        for key, mapped_keywords in keyword_mapping.items():
-            if key in product_name:
-                keywords.extend(mapped_keywords)
-
-        return list(set(keywords))
-
-    def _normalize_retrieved(self, items) -> List[Document]:
-        """검색 결과 정규화 (기존 orchestrator와 동일)"""
-        norm = []
-        for it in items or []:
-            if isinstance(it, Document):
-                norm.append(it)
-            elif isinstance(it, str):
-                norm.append(Document(page_content=it, metadata={"source_type": "raw_text"}))
-            elif isinstance(it, dict):
-                text = it.get("page_content") or it.get("text") or it.get("content") or ""
-                meta = it.get("metadata") or {}
-                norm.append(Document(page_content=text, metadata=meta))
-            else:
-                norm.append(Document(page_content=str(it), metadata={"source_type": "unknown"}))
-        return norm
-
-    def _format_context(self, docs) -> str:
-        """컨텍스트 포맷 (기존 orchestrator와 동일)"""
-        lines = []
-        for d in docs:
-            meta = d.metadata or {}
-            src = meta.get("relative_path") or meta.get("file_name") or meta.get("source_type") or "unknown_source"
-            snippet = (d.page_content or "").strip()
-            if not snippet:
-                continue
-            lines.append(f"[source: {src}]\n{snippet}")
-        return "\n---\n".join(lines)
-
-    def _filter_by_relevance_score(self, docs: List[Document], query: str) -> List[Document]:
-        """관련성 필터링 (기존 orchestrator와 동일)"""
-        if not docs:
-            return docs
-
-        query_words = set(query.lower().split())
-        scored_docs = []
-
-        for doc in docs:
-            content = (doc.page_content or "").lower()
-            metadata = doc.metadata or {}
-
-            score = 1.0
-
-            # 키워드 매칭 보너스
-            content_words = set(content.split())
-            keyword_overlap = len(query_words.intersection(content_words))
-            score += keyword_overlap * 0.1
-
-            # 메타데이터 키워드 매칭 보너스
-            metadata_keywords = metadata.get("keywords", [])
-            for keyword in metadata_keywords:
-                if keyword.lower() in query.lower():
-                    score += 0.2
-
-            # 파일명 매칭 보너스
-            file_name = metadata.get("file_name", "").lower()
-            for word in query_words:
-                if word in file_name:
-                    score += 0.3
-
-            scored_docs.append((score, doc))
-
-        scored_docs.sort(key=lambda x: x[0], reverse=True)
-        min_score = 1.0
-        filtered_docs = [doc for score, doc in scored_docs if score >= min_score]
-
-        return filtered_docs[:5]
 
     def _build_category_specific_system_message(self, category: str, context_text: str) -> SystemMessage:
         """카테고리별 시스템 메시지 (기존 orchestrator와 동일)"""
