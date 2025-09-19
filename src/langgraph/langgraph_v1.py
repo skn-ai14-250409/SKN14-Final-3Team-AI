@@ -5,16 +5,16 @@
 기존 코드는 그대로 유지하고 새로운 접근 방식을 시험해보기 위한 파일
 """
 
-from typing import Dict, List, Any, TypedDict, Annotated, Optional  # <- Optional 추가
+from typing import Dict, List, Any, TypedDict, Annotated
 import logging
+import re
 from operator import add
-import re  # 기존 유지
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import MessagesState
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.documents import Document
-from pydantic import BaseModel, Field  # 기존 유지
+from pydantic import BaseModel, Field
 
 from src.slm.slm import SLM
 from src.rag.vector_store import VectorStore
@@ -41,53 +41,45 @@ class RAGState(TypedDict):
     context_text: str
     response: str
     sources: List[Dict[str, Any]]
-    key_facts: Dict[str, Any]  # <- 은행원용 핵심 카드
+    is_first_question: bool     # 첫 턴 세션 정보
+    initial_intent: str
+    initial_topic_summary: str  # 세션 제목(요약)
 
-# Pydantic 모델들
-class ProductNameResponse(BaseModel):  # 기존 유지
+
+# Pydantic 모델: 함수 내부 중첩 정의를 모듈 수준으로 이동
+class ProductNameResponse(BaseModel):
     product_name: str = Field(
         ...,
         description="질문에서 언급된 KB금융그룹 상품명만 추출하세요. 상품명이 없으면 빈 문자열을 반환하세요."
     )
 
-class KeyFacts(BaseModel):  # <- 추가
-    rate: Optional[str] = None
-    limit: Optional[str] = None
-    eligibility: List[str] = []
-    required_docs: List[str] = []
-    fees: List[str] = []
-    repayment: Optional[str] = None
-    term: Optional[str] = None
-    exceptions: List[str] = []
-    effective_date: Optional[str] = None
-    clarifying_questions: List[str] = []
-    confidence: Optional[float] = None
 
 class LangGraphRAGWorkflow:
     """LangGraph 기반 실험용 RAG 워크플로우"""
-    
+
     def __init__(self):
         self.slm = SLM()
         self.vector_store = VectorStore()
         self.router = IntentRouter()
         self.workflow = self._build_workflow()
-        
+
     def _build_workflow(self) -> StateGraph:
         """LangGraph 워크플로우 구축"""
         workflow = StateGraph(RAGState)
-        
+
         # 노드 추가
+        workflow.add_node("first_turn_preprocess", self._first_turn_preprocess)
         workflow.add_node("classify_intent", self._classify_intent)
         workflow.add_node("handle_general_faq", self._handle_general_faq)
         workflow.add_node("extract_product_name", self._extract_product_name)
         workflow.add_node("search_documents", self._search_documents)
         workflow.add_node("filter_relevance", self._filter_relevance)
         workflow.add_node("generate_response", self._generate_response)
-        workflow.add_node("key_facts_formatter", self._key_facts_formatter)  # <- 추가
-        
+
         # 엣지 추가 (조건부 라우팅)
-        workflow.add_edge(START, "classify_intent")
-        
+        workflow.add_edge(START, "first_turn_preprocess")
+        workflow.add_edge("first_turn_preprocess", "classify_intent")
+
         workflow.add_conditional_edges(
             "classify_intent",
             self._route_by_category,
@@ -96,19 +88,78 @@ class LangGraphRAGWorkflow:
                 "rag_needed": "extract_product_name"
             }
         )
-        
-        # 기존 경로
+
+        workflow.add_edge("handle_general_faq", END)
         workflow.add_edge("extract_product_name", "search_documents")
         workflow.add_edge("search_documents", "filter_relevance")
         workflow.add_edge("filter_relevance", "generate_response")
-        
-        # 변경: 모든 응답은 key_facts_formatter를 반드시 거쳐서 종료
-        workflow.add_edge("generate_response", "key_facts_formatter")
-        workflow.add_edge("handle_general_faq", "key_facts_formatter")
-        workflow.add_edge("key_facts_formatter", END)
-        
+        workflow.add_edge("generate_response", END)
+
         return workflow.compile()
-    
+
+
+    def _first_turn_preprocess(self, state: RAGState) -> RAGState:
+        """세션의 첫 질문에 대해서만 실행되는 전처리 노드(최소 예외 처리).
+
+        동작:
+        - 세션 첫 질문인지 확인 (is_first_question)
+        - router로 intent 획득(initial_intent) — 오류는 상위로 전달
+        - SLM으로 챗봇 세션용 짧은 제목 생성(initial_topic_summary)
+          (SLM 호출 실패에 대해서만 최소 폴백 처리)
+        - is_first_question을 False로 설정하고 상태 반환
+        """
+        # 이미 처리되었다면 그대로 반환 (세션 내 1회 실행)
+        if not state.get("is_first_question", True):
+            return state
+
+        query = state.get("query", "") or ""
+        # router 호출에 대한 try/except는 제거 — 오류는 상위로 전달되어야 디버깅에 유리
+        initial_intent = (self.router.route_prompt(query) or "").strip()
+
+        # 제목 생성: LLM 호출만 한 번의 예외 처리 (운영상 폴백 허용)
+        system_message = SystemMessage(
+            "당신은 '챗봇 세션 제목 생성기'입니다. 사용자의 질문을 보고 "
+            "이 세션을 대표할 매우 간결한 한 줄 제목을 생성하세요."
+        )
+        human_prompt = (
+            f"사용자 질문: {query}\n\n"
+            "출력: 제목 텍스트만 한 줄로 출력\n"
+            "- 한국어로 간결하게 (17 어절 권장)\n"
+            "- 불필요한 설명 없이 제목만 반환\n"
+        )
+        messages = [system_message, HumanMessage(human_prompt)]
+
+        session_title = ""
+        MAX_TITLE_CHARS = 60
+
+        try:
+            raw = (self.slm.invoke(messages) or "").strip()
+            if raw:
+                session_title = raw.splitlines()[0].strip()
+                if len(session_title) > MAX_TITLE_CHARS:
+                    session_title = session_title[:MAX_TITLE_CHARS].rstrip() + "..."
+        except Exception as e:
+            # 최소 폴백: intent 또는 질문의 앞부분 사용
+            logger.warning(f"[GRAPH] first_turn_preprocess: title generation failed: {e}")
+            session_title = ""
+
+        if not session_title:
+            # LLM 실패 또는 빈 결과일 때 폴백: intent 우선, 없으면 질문 앞부분
+            session_title = initial_intent or (query.strip().splitlines()[0][:MAX_TITLE_CHARS] or "새로운 질문")
+
+        logger.info(
+            f"[GRAPH] First-turn preprocess done. intent={initial_intent!r}, session_title={session_title!r}"
+        )
+
+        return {
+            **state,
+            "is_first_question": False,
+            "initial_intent": initial_intent,
+            # 기존 필드명(initial_topic_summary)을 세션 제목 저장 용도로 재사용
+            "initial_topic_summary": session_title,
+        }
+
+
     def _classify_intent(self, state: RAGState) -> RAGState:
         """인텐트 분류 노드"""
         query = state["query"]
@@ -136,6 +187,7 @@ class LangGraphRAGWorkflow:
         """일반 FAQ 처리 노드"""
         query = state["query"]
         
+        # 일반 FAQ용 시스템 메시지
         system_message = SystemMessage("""당신은 KB금융그룹의 고객 상담 전문가입니다.
 
 지침:
@@ -179,17 +231,22 @@ class LangGraphRAGWorkflow:
         self.vector_store.get_index_ready()
         raw_retrieved = []
         
+        # 기존 orchestrator와 동일한 검색 로직
         if product_name:
+            # 1차: 파일명 정확 매칭
             filename_with_underscores = product_name.replace(" ", "_") + ".pdf"
             raw_retrieved = self.vector_store.similarity_search_by_filename(query, filename_with_underscores)
             
             if not raw_retrieved:
+                # 2차: 키워드 검색
                 keywords = self._extract_keywords_from_product_name(product_name)
                 raw_retrieved = self.vector_store.similarity_search_by_keywords(query, keywords)
                 
                 if not raw_retrieved:
+                    # 3차: 일반 검색
                     raw_retrieved = self.vector_store.similarity_search(query)
         else:
+            # 카테고리별 검색 또는 일반 검색
             if category == COMPANY_PRODUCTS_CATEGORY:
                 raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_PRODUCT)
             elif category == COMPANY_RULES_CATEGORY:
@@ -199,6 +256,7 @@ class LangGraphRAGWorkflow:
             else:
                 raw_retrieved = self.vector_store.similarity_search(query)
         
+        # 문서 정규화
         retrieved_docs = self._normalize_retrieved(raw_retrieved)
         
         logger.info(f"[GRAPH] Retrieved {len(retrieved_docs)} documents")
@@ -238,11 +296,13 @@ class LangGraphRAGWorkflow:
                 "sources": []
             }
         
+        # 카테고리별 시스템 메시지 생성
         system_message = self._build_category_specific_system_message(category, context_text)
         messages = [system_message, HumanMessage(query)]
         
         response = self.slm.invoke(messages)
         
+        # 소스 정보 추출
         sources = []
         for doc in retrieved_docs:
             metadata = doc.metadata or {}
@@ -256,27 +316,6 @@ class LangGraphRAGWorkflow:
             "response": response,
             "sources": sources
         }
-
-    def _key_facts_formatter(self, state: RAGState) -> RAGState:
-        """은행원용 핵심 정보 카드 생성 노드 (필수 최소 구현)"""
-        response_text = state.get("response", "") or ""
-        context_text = state.get("context_text", "") or ""
-
-        prompt = f"""
-다음 <컨텍스트>와 <모델응답>을 기반으로 은행 창구 실무자가 바로 볼 수 있는 핵심 정보를 구조화하세요.
-문서/응답에 근거가 없는 값은 비워두세요. 추측하지 마세요.
-
-<컨텍스트>
-{context_text}
-</컨텍스트>
-
-<모델응답>
-{response_text}
-</모델응답>
-"""
-        facts = self.slm.get_structured_output(prompt, KeyFacts).dict()
-        logger.info(f"[GRAPH] Key facts: {facts}")  # ✅ 로그로 확인
-        return {**state, "key_facts": facts}
     
     def run_workflow(self, query: str) -> Dict[str, Any]:
         """워크플로우 실행"""
@@ -288,8 +327,7 @@ class LangGraphRAGWorkflow:
             retrieved_docs=[],
             context_text="",
             response="",
-            sources=[],
-            key_facts={}  # <- 추가
+            sources=[]
         )
         
         try:
@@ -298,16 +336,14 @@ class LangGraphRAGWorkflow:
             return {
                 "response": final_state["response"],
                 "sources": final_state["sources"],
-                "category": final_state.get("category", "unknown"),
-                "key_facts": final_state.get("key_facts", {})  # <- 추가
+                "category": final_state.get("category", "unknown")
             }
         except Exception as e:
             logger.error(f"[GRAPH] Workflow execution failed: {e}")
             return {
                 "response": "처리 중 오류가 발생했습니다.",
                 "sources": [],
-                "category": "error",
-                "key_facts": {}
+                "category": "error"
             }
     
     # 기존 orchestrator의 헬퍼 메서드들 복사
@@ -395,15 +431,19 @@ class LangGraphRAGWorkflow:
             metadata = doc.metadata or {}
             
             score = 1.0
+            
+            # 키워드 매칭 보너스
             content_words = set(content.split())
             keyword_overlap = len(query_words.intersection(content_words))
             score += keyword_overlap * 0.1
             
+            # 메타데이터 키워드 매칭 보너스
             metadata_keywords = metadata.get("keywords", [])
             for keyword in metadata_keywords:
                 if keyword.lower() in query.lower():
                     score += 0.2
             
+            # 파일명 매칭 보너스
             file_name = metadata.get("file_name", "").lower()
             for word in query_words:
                 if word in file_name:
@@ -467,6 +507,7 @@ class LangGraphRAGWorkflow:
 {context}
 </검색된_문서>"""
         else:
+            # 기본 시스템 메시지
             system_prompt = """당신은 KB금융그룹의 전문 AI 어시스턴트입니다.
 
 지침:
