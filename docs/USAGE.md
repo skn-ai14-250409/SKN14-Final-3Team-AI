@@ -5,6 +5,8 @@
 ### 1. 서버 실행
 ```bash
 python run_server.py --reload --host 0.0.0.0 --port 8000
+
+python run_server.py --host 0.0.0.0 --port 8001 --reload # <-- django랑 같이 할 때 서버가 8000으로 같으면 안됨
 ```
 
 ### 2. 데이터 업로드

@@ -151,7 +151,7 @@ class LangGraphRAGWorkflow:
             **state,
             "product_name": product_name
         }
-    
+
     def _search_documents(self, state: RAGState) -> RAGState:
         """문서 검색 노드"""
         query = state["query"]
@@ -160,30 +160,50 @@ class LangGraphRAGWorkflow:
         
         self.vector_store.get_index_ready()
         raw_retrieved = []
-        
-        # 기존 orchestrator와 동일한 검색 로직
-        if product_name:
-            # 1차: 파일명 정확 매칭
-            filename_with_underscores = product_name.replace(" ", "_") + ".pdf"
-            raw_retrieved = self.vector_store.similarity_search_by_filename(query, filename_with_underscores)
+
+        # 1차: 질문 키워드로 정확한 파일명 매칭 (최우선)
+        try:
+            query_keywords = self._extract_keywords_from_query(query)
+            exact_filename = self._find_exact_filename_match(query_keywords)
             
-            if not raw_retrieved:
-                # 2차: 키워드 검색
-                keywords = self._extract_keywords_from_product_name(product_name)
-                raw_retrieved = self.vector_store.similarity_search_by_keywords(query, keywords)
+            if exact_filename:
+                raw_retrieved = self.vector_store.similarity_search_by_filename(query, exact_filename)
+                logger.info(f"[GRAPH] Exact filename match: {exact_filename}")
+        except Exception as e:
+            logger.warning(f"[GRAPH] Filename matching failed: {e}")
+            # 파일명 매칭 실패 시 계속 진행
+
+        # 2차: 상품명 기반 검색 (정확한 파일명 매칭이 실패한 경우만)
+        if not raw_retrieved and product_name:
+            try:
+                # 1차: 파일명 정확 매칭
+                filename_with_underscores = product_name.replace(" ", "_") + ".pdf"
+                raw_retrieved = self.vector_store.similarity_search_by_filename(query, filename_with_underscores)
                 
                 if not raw_retrieved:
-                    # 3차: 일반 검색
-                    raw_retrieved = self.vector_store.similarity_search(query)
+                    # 2차: 키워드 검색
+                    keywords = self._extract_keywords_from_product_name(product_name)
+                    raw_retrieved = self.vector_store.similarity_search_by_keywords(query, keywords)
+                    
+                    if not raw_retrieved:
+                        # 3차: 일반 검색
+                        raw_retrieved = self.vector_store.similarity_search(query)
+            except Exception as e:
+                logger.warning(f"[GRAPH] Product name search failed: {e}")
+                raw_retrieved = self.vector_store.similarity_search(query)
         else:
-            # 카테고리별 검색 또는 일반 검색
-            if category == COMPANY_PRODUCTS_CATEGORY:
-                raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_PRODUCT)
-            elif category == COMPANY_RULES_CATEGORY:
-                raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_RULE)
-            elif category == INDUSTRY_POLICY_CATEGORY:
-                raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_LAW)
-            else:
+            # 3차: 카테고리별 검색 또는 일반 검색
+            try:
+                if category == COMPANY_PRODUCTS_CATEGORY:
+                    raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_PRODUCT)
+                elif category == COMPANY_RULES_CATEGORY:
+                    raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_RULE)
+                elif category == INDUSTRY_POLICY_CATEGORY:
+                    raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_LAW)
+                else:
+                    raw_retrieved = self.vector_store.similarity_search(query)
+            except Exception as e:
+                logger.warning(f"[GRAPH] Category search failed: {e}")
                 raw_retrieved = self.vector_store.similarity_search(query)
         
         # 문서 정규화
@@ -195,7 +215,111 @@ class LangGraphRAGWorkflow:
             **state,
             "retrieved_docs": retrieved_docs
         }
-    
+
+    def _find_exact_filename_match(self, query_keywords: List[str]) -> str:
+        """질문 키워드로 정확한 파일명 찾기 (동적 방식)"""
+        
+        try:
+            # 파일명에서 자동으로 키워드 추출
+            available_files = self.vector_store.get_available_files()
+            
+            if not available_files:
+                logger.warning("[GRAPH] No available files found")
+                return ""
+            
+            best_match = ""
+            max_score = 0.0
+            min_threshold = 0.3  # 최소 임계값 설정
+            
+            for filename in available_files:
+                try:
+                    # 파일명에서 키워드 자동 추출
+                    file_keywords = self._extract_keywords_from_filename(filename)
+                    
+                    # 질문 키워드와 매칭 점수 계산
+                    score = self._calculate_keyword_match_score(query_keywords, file_keywords)
+                    
+                    if score > max_score and score >= min_threshold:
+                        max_score = score
+                        best_match = filename
+                        
+                except Exception as e:
+                    logger.error(f"[GRAPH] Error processing filename {filename}: {e}")
+                    continue
+            
+            logger.info(f"[GRAPH] Best filename match: {best_match} (score: {max_score:.2f})")
+            return best_match if max_score >= min_threshold else ""
+            
+        except Exception as e:
+            logger.error(f"[GRAPH] Error in filename matching: {e}")
+            return ""
+
+    def _extract_keywords_from_query(self, query: str) -> List[str]:
+        """질문에서 핵심 키워드 추출"""
+        try:
+            keywords = []
+            words = query.split()
+            
+            # 불용어 제거
+            stop_words = ["은", "는", "이", "가", "을", "를", "에", "의", "로", "으로", "는", "도", "만", "부터", "까지", "에서", "에게", "한테", "와", "과", "의", "가", "이", "을", "를", "에", "에서", "로", "으로", "부터", "까지", "만", "도", "는", "은", "이", "가", "을", "를", "에", "의", "로", "으로", "뭐", "있어", "있나", "알려", "주세요", "안내", "정보"]
+            
+            for word in words:
+                if len(word) > 1 and word not in stop_words:
+                    keywords.append(word)
+            
+            return keywords
+        except Exception as e:
+            logger.error(f"[GRAPH] Error extracting keywords from query: {e}")
+            return []
+
+    def _extract_keywords_from_filename(self, filename: str) -> List[str]:
+        """파일명에서 키워드 자동 추출"""
+        try:
+            # 파일명 정리 (확장자 제거, 언더스코어/공백 처리)
+            clean_name = filename.replace(".pdf", "").replace("KB_", "").replace("_", " ")
+            
+            # 한글, 영문, 숫자만 추출
+            keywords = re.findall(r'[가-힣a-zA-Z0-9]+', clean_name)
+            
+            # 길이가 1인 단어 제거
+            keywords = [kw for kw in keywords if len(kw) > 1]
+            
+            return keywords
+        except Exception as e:
+            logger.error(f"[GRAPH] Error extracting keywords from filename: {e}")
+            return []
+
+    def _calculate_keyword_match_score(self, query_keywords: List[str], file_keywords: List[str]) -> float:
+        """키워드 매칭 점수 계산 (개선된 버전)"""
+        try:
+            if not query_keywords or not file_keywords:
+                return 0.0
+            
+            # 정확한 매칭 (가장 높은 점수)
+            exact_matches = len(set(query_keywords) & set(file_keywords))
+            
+            # 부분 매칭 (포함 관계) - 중복 계산 방지
+            partial_matches = 0
+            matched_query_words = set()
+            
+            for q_kw in query_keywords:
+                for f_kw in file_keywords:
+                    if q_kw in f_kw or f_kw in q_kw:
+                        if q_kw not in matched_query_words:  # 중복 방지
+                            partial_matches += 0.3
+                            matched_query_words.add(q_kw)
+            
+            # 가중치 적용
+            total_score = exact_matches * 1.0 + partial_matches * 0.3
+            
+            # 정규화 (질문 키워드 수로 나누기)
+            return total_score / len(query_keywords) if query_keywords else 0.0
+        except Exception as e:
+            logger.error(f"[GRAPH] Error calculating keyword match score: {e}")
+            return 0.0
+
+# ----------------------------------------------------------------------------------------------------------------------------
+
     def _filter_relevance(self, state: RAGState) -> RAGState:
         """관련성 필터링 노드"""
         docs = state["retrieved_docs"]
@@ -232,11 +356,15 @@ class LangGraphRAGWorkflow:
         
         response = self.slm.invoke(messages)
         
-        # 소스 정보 추출
+        # 소스 정보 추출 - 수정된 부분
         sources = []
         for doc in retrieved_docs:
             metadata = doc.metadata or {}
-            sources.append(dict(metadata))
+            # 실제 문서 내용도 포함
+            source_info = dict(metadata)
+            source_info['text'] = doc.page_content  # 실제 문서 내용 추가
+            source_info['page_content'] = doc.page_content  # 호환성을 위해 추가
+            sources.append(source_info)
         
         logger.info(f"[GRAPH] Generated response with {len(sources)} sources")
         
@@ -266,27 +394,34 @@ class LangGraphRAGWorkflow:
             return {
                 "response": final_state["response"],
                 "sources": final_state["sources"],
-                "category": final_state.get("category", "unknown")
+                "category": final_state.get("category", "unknown"),
+                "product_name": final_state.get("product_name", "")  # 이 줄 추가!
             }
         except Exception as e:
             logger.error(f"[GRAPH] Workflow execution failed: {e}")
             return {
                 "response": "처리 중 오류가 발생했습니다.",
                 "sources": [],
-                "category": "error"
+                "category": "error",
+                "product_name": ""
             }
     
     # 기존 orchestrator의 헬퍼 메서드들 복사
+    # 프롬프트 좀 더 구체적으로 작성.
     def _extract_product_name_from_question(self, question: str) -> str:
         """질문에서 상품명을 추출하는 메서드 (기존 orchestrator와 동일)"""
         try:
             extraction_prompt = f"""
-                다음 질문에서 KB금융그룹 상품명만 추출하세요. 답변을 생성하지 말고 상품명만 추출하세요.
-
+                다음 질문에서 질문자의 의도와 가장 관련성이 높은 KB금융그룹 상품명만 추출하세요.
                 질문: {question}
-
-                상품명 예시: KB 동반성장협약 상생대출, KB닥터론, KB 스마트론, KB 햇살론 등
+                
+                규칙:
+                1) 질문에서 명시적으로 언급된 상품명만 추출
+                2) 질문의 맥락과 관련 없는 상품명은 추출하지 않음
+                3) 상품명이 명확하지 않으면 빈 문자열 반환
+                4) 예시는 참고용일 뿐, 질문과 무관한 상품명 추출 금지
             """
+
             product_response = self.slm.get_structured_output(
                 extraction_prompt,
                 ProductNameResponse

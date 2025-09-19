@@ -7,7 +7,7 @@ from pathlib import Path
 import os
 
 from src.orchestrator import Orchestrator
-from src.langgraph.langgraph_rag import get_langgraph_workflow
+from src.langgraph.langgraph_v1 import get_langgraph_workflow
 from src.rag.vector_store import VectorStore
 from src.config import VECTOR_STORE_INDEX_NAME, DATA_FOLDER_PATH
 from src.constants import STATUS_SUCCESS, STATUS_FAIL
@@ -39,6 +39,11 @@ class LLMOnlyInput(BaseModel):
 # Intent 라우팅 기반 처리 요청 모델
 class IntentRoutingInput(BaseModel):
     prompt: str
+
+# LangGraph RAG 요청 모델 (세션 지원)
+class LangGraphRAGInput(BaseModel):
+    prompt: str
+    session_id: Optional[str] = None  # 세션 ID (선택사항)
 
 # 폴더 업로드 요청 모델
 class IngestFolderReq(BaseModel):
@@ -87,6 +92,19 @@ class IntentRouterResponse(BaseResponse):
     route: Dict
     answer: str
     sources: List[Dict] = []
+
+# LangGraph RAG 응답 모델 (세션 정보 포함)
+class LangGraphRAGResponse(BaseResponse):
+    response: str
+    sources: List[Dict] = []
+    category: str = ""
+    product_name: str = ""
+    session_info: Optional[Dict] = None  # 세션 정보
+    initial_intent: str = ""  # 호환성 유지
+    initial_topic_summary: str = ""  # 호환성 유지
+    conversation_mode: str = "normal"  # 대화 모드
+    current_topic: str = ""  # 현재 토픽
+    active_product: Optional[str] = ""  # 활성 상품 (Optional로 수정)
 
 # ==============================================
 # 상수 및 헬퍼 함수
@@ -187,38 +205,199 @@ async def answer_with_llm_only(input: LLMOnlyInput):
             response=f"LLM 답변 생성 중 오류가 발생했습니다: {str(e)}"
         )
 
-@router.post("/langgraph/langgraph_rag")
-async def experimental_langgraph_rag(input: QueryRagInput):
+@router.post("/langgraph/langgraph_rag", response_model=LangGraphRAGResponse)
+async def experimental_langgraph_rag(input: LangGraphRAGInput):
     """
-    실험용 LangGraph RAG 엔드포인트
+    개선된 LangGraph RAG 엔드포인트
     
-    기존 orchestrator와 동일한 기능을 LangGraph로 구현한 실험용 버전
-    기존 코드는 그대로 유지하고 새로운 접근 방식을 테스트하기 위한 엔드포인트
+    - 세션 관리 지원
+    - 강화된 에러 처리
+    - 성능 최적화된 파일명 매칭
+    - 구조화된 로깅
+    - 세션 정보 반환
     """
-    logger.info(f"[EXPERIMENTAL] LangGraph RAG query: {input.prompt}")
+    logger.info(f"[LANGGRAPH] RAG query: {input.prompt[:100]}... (session_id: {input.session_id})")
     
     try:
         workflow = get_langgraph_workflow()
-        result = workflow.run_workflow(input.prompt)
+        result = workflow.run_workflow(input.prompt, input.session_id)
         
-        return { #result["response"] # 원래 코드 {
-            # "status": STATUS_SUCCESS,
-            "response": result["response"],
-            # "sources": result["sources"],
-            "category": result["category"],
-            # "experimental": True,
-            "key_facts": result.get("key_facts", {}),
-            # "workflow_type": "langgraph"
+        return LangGraphRAGResponse(
+                    status=STATUS_SUCCESS,
+                    response=result["response"],
+                    sources=result["sources"],
+                    category=result["category"],
+                    product_name=result.get("product_name", ""),
+                    session_info=result.get("session_info", {}),
+                    initial_intent=result.get("initial_intent", ""),
+                    initial_topic_summary=result.get("initial_topic_summary", ""),
+                    conversation_mode=result.get("session_info", {}).get("conversation_mode", "normal"),
+                    current_topic=result.get("session_info", {}).get("current_topic", ""),
+                    active_product=result.get("session_info", {}).get("active_product", "")
+                )
+    except Exception as e:
+        logger.error(f"[LANGGRAPH] RAG failed: {e}")
+        return LangGraphRAGResponse(
+            status=STATUS_FAIL,
+            response=f"LangGraph RAG 처리 중 오류가 발생했습니다: {str(e)}",
+            sources=[],
+            category="error",
+            product_name="",
+            session_info={},
+            initial_intent="",
+            initial_topic_summary="",
+            conversation_mode="error",
+            current_topic="",
+            active_product=""
+        )
+
+# LangGraph 세션 관리 엔드포인트
+@router.get("/langgraph/session/{session_id}")
+async def get_session_info(session_id: str):
+    """세션 정보 조회"""
+    try:
+        from src.langgraph.session_manager import session_manager
+        
+        session = session_manager.get_session(session_id)
+        if not session:
+            return {
+                "status": STATUS_FAIL,
+                "message": f"세션을 찾을 수 없습니다: {session_id}"
+            }
+        
+        # 대화 히스토리 조회
+        conversation_history = session_manager.get_conversation_history(session_id, limit=10)
+        message_history = session_manager.get_message_history(session_id, limit=20)
+        
+        return {
+            "status": STATUS_SUCCESS,
+            "session_info": session.to_dict(),
+            "conversation_history": [turn.to_dict() for turn in conversation_history],
+            "message_count": len(message_history),
+            "total_turns": len(conversation_history)
         }
     except Exception as e:
-        logger.error(f"[EXPERIMENTAL] LangGraph RAG failed: {e}")
+        logger.error(f"Session info retrieval failed: {e}")
         return {
             "status": STATUS_FAIL,
-            "response": f"실험용 LangGraph RAG 처리 중 오류가 발생했습니다: {str(e)}",
-            "sources": [],
-            "category": "error",
-            "experimental": True,
-            "workflow_type": "langgraph"
+            "message": f"세션 정보 조회 중 오류가 발생했습니다: {str(e)}"
+        }
+
+# 멀티턴 대화 전용 엔드포인트
+@router.post("/langgraph/multiturn", response_model=LangGraphRAGResponse)
+async def multiturn_conversation(input: LangGraphRAGInput):
+    """멀티턴 대화 전용 엔드포인트"""
+    logger.info(f"[MULTITURN] Conversation query: {input.prompt[:100]}... (session_id: {input.session_id})")
+    
+    try:
+        workflow = get_langgraph_workflow()
+        result = workflow.run_workflow(input.prompt, input.session_id)
+        
+        return LangGraphRAGResponse(
+            status=STATUS_SUCCESS,
+            response=result["response"],
+            sources=result["sources"],
+            category=result["category"],
+            product_name=result.get("product_name", ""),
+            session_info=result.get("session_info", {}),
+            initial_intent=result.get("initial_intent", ""),
+            initial_topic_summary=result.get("initial_topic_summary", ""),
+            conversation_mode=result.get("session_info", {}).get("conversation_mode", "normal"),
+            current_topic=result.get("session_info", {}).get("current_topic", ""),
+            active_product=result.get("session_info", {}).get("active_product", "")
+        )
+    except Exception as e:
+        logger.error(f"[MULTITURN] Conversation failed: {e}")
+        return LangGraphRAGResponse(
+            status=STATUS_FAIL,
+            response=f"멀티턴 대화 처리 중 오류가 발생했습니다: {str(e)}",
+            sources=[],
+            category="error",
+            product_name="",
+            session_info={},
+            initial_intent="",
+            initial_topic_summary="",
+            conversation_mode="error",
+            current_topic="",
+            active_product=""
+        )
+
+# 세션 정리 엔드포인트
+@router.delete("/langgraph/session/{session_id}")
+async def delete_session(session_id: str):
+    """세션 삭제"""
+    try:
+        from src.langgraph.session_manager import session_manager
+        
+        success = session_manager.delete_session(session_id)
+        if success:
+            return {
+                "status": STATUS_SUCCESS,
+                "message": f"세션이 삭제되었습니다: {session_id}"
+            }
+        else:
+            return {
+                "status": STATUS_FAIL,
+                "message": f"세션을 찾을 수 없습니다: {session_id}"
+            }
+    except Exception as e:
+        logger.error(f"Session deletion failed: {e}")
+        return {
+            "status": STATUS_FAIL,
+            "message": f"세션 삭제 중 오류가 발생했습니다: {str(e)}"
+        }
+
+# 세션 통계 조회 엔드포인트
+@router.get("/langgraph/sessions/stats")
+async def get_session_stats():
+    """세션 통계 조회"""
+    try:
+        from src.langgraph.session_manager import session_manager
+        
+        stats = session_manager.get_session_stats()
+        return {
+            "status": STATUS_SUCCESS,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Session stats retrieval failed: {e}")
+        return {
+            "status": STATUS_FAIL,
+            "message": f"세션 통계 조회 중 오류가 발생했습니다: {str(e)}"
+        }
+
+# LangGraph 워크플로우 상태 조회
+@router.get("/langgraph/workflow/status")
+async def get_workflow_status():
+    """LangGraph 워크플로우 상태 조회"""
+    try:
+        workflow = get_langgraph_workflow()
+        return {
+            "status": STATUS_SUCCESS,
+            "workflow_type": "LangGraph RAG Workflow",
+            "features": [
+                "세션 관리",
+                "강화된 에러 처리", 
+                "성능 최적화된 파일명 매칭",
+                "구조화된 로깅",
+                "카테고리별 처리",
+                "상품명 추출"
+            ],
+            "nodes": [
+                "first_turn_preprocess",
+                "classify_intent", 
+                "handle_general_faq",
+                "extract_product_name",
+                "search_documents",
+                "filter_relevance",
+                "generate_response"
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Workflow status check failed: {e}")
+        return {
+            "status": STATUS_FAIL,
+            "message": f"워크플로우 상태 조회 중 오류가 발생했습니다: {str(e)}"
         }
 
 # Intent 라우팅 기반 처리
