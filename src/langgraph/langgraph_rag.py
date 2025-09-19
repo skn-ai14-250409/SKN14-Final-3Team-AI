@@ -151,52 +151,7 @@ class LangGraphRAGWorkflow:
             **state,
             "product_name": product_name
         }
-    
-    # def _search_documents(self, state: RAGState) -> RAGState:
-    #     """문서 검색 노드"""
-    #     query = state["query"]
-    #     product_name = state.get("product_name", "")
-    #     category = state["category"]
-        
-    #     self.vector_store.get_index_ready()
-    #     raw_retrieved = []
-        
-    #     # 기존 orchestrator와 동일한 검색 로직
-    #     if product_name:
-    #         # 1차: 파일명 정확 매칭
-    #         filename_with_underscores = product_name.replace(" ", "_") + ".pdf"
-    #         raw_retrieved = self.vector_store.similarity_search_by_filename(query, filename_with_underscores)
-            
-    #         if not raw_retrieved:
-    #             # 2차: 키워드 검색
-    #             keywords = self._extract_keywords_from_product_name(product_name)
-    #             raw_retrieved = self.vector_store.similarity_search_by_keywords(query, keywords)
-                
-    #             if not raw_retrieved:
-    #                 # 3차: 일반 검색
-    #                 raw_retrieved = self.vector_store.similarity_search(query)
-    #     else:
-    #         # 카테고리별 검색 또는 일반 검색
-    #         if category == COMPANY_PRODUCTS_CATEGORY:
-    #             raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_PRODUCT)
-    #         elif category == COMPANY_RULES_CATEGORY:
-    #             raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_RULE)
-    #         elif category == INDUSTRY_POLICY_CATEGORY:
-    #             raw_retrieved = self.vector_store.similarity_search_by_folder(query, MAIN_LAW)
-    #         else:
-    #             raw_retrieved = self.vector_store.similarity_search(query)
-        
-    #     # 문서 정규화
-    #     retrieved_docs = self._normalize_retrieved(raw_retrieved)
-        
-    #     logger.info(f"[GRAPH] Retrieved {len(retrieved_docs)} documents")
-        
-    #     return {
-    #         **state,
-    #         "retrieved_docs": retrieved_docs
-    #     }
 
-# ------------------------------------------------ 여기 추가해봄 --------------------------------------------------
     def _search_documents(self, state: RAGState) -> RAGState:
         """문서 검색 노드"""
         query = state["query"]
@@ -401,7 +356,7 @@ class LangGraphRAGWorkflow:
         
         response = self.slm.invoke(messages)
         
-        # 소스 정보 추출 - 수정된 부분 (의령)
+        # 소스 정보 추출 - 수정된 부분
         sources = []
         for doc in retrieved_docs:
             metadata = doc.metadata or {}
@@ -452,16 +407,10 @@ class LangGraphRAGWorkflow:
             }
     
     # 기존 orchestrator의 헬퍼 메서드들 복사
-    # 프롬프트 좀 더 구체적으로 작성함 ! (의령)
+    # 프롬프트 좀 더 구체적으로 작성.
     def _extract_product_name_from_question(self, question: str) -> str:
         """질문에서 상품명을 추출하는 메서드 (기존 orchestrator와 동일)"""
         try:
-            # extraction_prompt = f"""
-            #     다음 질문에서 KB금융그룹 상품명만 추출하세요. 답변을 생성하지 말고 상품명만 추출하세요.
-            #     질문: {question}
-            #     상품명 예시: KB 동반성장협약 상생대출, KB닥터론, KB 스마트론, KB 햇살론 등
-            # """
-            
             extraction_prompt = f"""
                 다음 질문에서 질문자의 의도와 가장 관련성이 높은 KB금융그룹 상품명만 추출하세요.
                 질문: {question}
