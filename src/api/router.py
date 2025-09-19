@@ -202,10 +202,11 @@ async def experimental_langgraph_rag(input: QueryRagInput):
         result = workflow.run_workflow(input.prompt)
         
         return { #result["response"] # 원래 코드 {
-            # "status": STATUS_SUCCESS,
+            "status": STATUS_SUCCESS,
             "response": result["response"],
-            # "sources": result["sources"],
+            "sources": result["sources"],  # 메타데이터를 추출하기 위해 추가 (의령)
             "category": result["category"],
+            "product_name": result.get("product_name", ""), # 상품명 추가 (의령)
             # "experimental": True,
             "key_facts": result.get("key_facts", {}),
             # "workflow_type": "langgraph"
@@ -217,8 +218,10 @@ async def experimental_langgraph_rag(input: QueryRagInput):
             "response": f"실험용 LangGraph RAG 처리 중 오류가 발생했습니다: {str(e)}",
             "sources": [],
             "category": "error",
-            "experimental": True,
-            "workflow_type": "langgraph"
+            "product_name": "",
+            "key_facts": {},
+            # "experimental": True,
+            # "workflow_type": "langgraph"
         }
 
 # Intent 라우팅 기반 처리
