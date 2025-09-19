@@ -5,11 +5,14 @@
 기존 코드는 그대로 유지하고 새로운 접근 방식을 시험해보기 위한 파일
 """
 
-from typing import Dict, List, Any, TypedDict, Annotated
+from typing import Dict, List, Any, TypedDict, Annotated, Optional, Pattern
 import logging
 import re
 import time
 import uuid
+import os
+import yaml
+from dataclasses import dataclass, field
 from datetime import datetime
 from operator import add
 
@@ -265,6 +268,30 @@ class RAGUtils:
         filtered_docs = [doc for score, doc in scored_docs if score >= min_score]
 
         return filtered_docs[:5]
+
+# --------------------- Guardrail YAML dataclasses ---------------------
+@dataclass
+class PolicySourceRef:
+    file: str
+    clause: Optional[str] = None
+
+@dataclass
+class PolicyRule:
+    rule_id: str
+    policy: str
+    severity: str                 # "HIGH" | "MEDIUM" | "LOW"
+    patterns: List[str]
+    disclosures: List[str] = field(default_factory=list)
+    fix_hint: str = ""
+    sources: List[PolicySourceRef] = field(default_factory=list)
+    compiled: List[Pattern] = field(default_factory=list)
+
+@dataclass
+class SoftFixRule:
+    pattern: str
+    replacement: str
+    compiled: Optional[Pattern] = None
+
 # LangGraph State 정의
 class RAGState(TypedDict):
     """RAG 워크플로우의 상태를 관리하는 클래스"""
@@ -279,6 +306,10 @@ class RAGState(TypedDict):
     session_context: SessionContext  # 멀티턴 세션 컨텍스트
     conversation_history: List[ConversationTurn]  # 대화 히스토리
     turn_id: str  # 현재 턴 ID
+    # guardrail 결과 (최소)
+    guardrail_decision: str
+    violations: List[Dict[str, Any]]
+    compliant_response: str
 
 # Pydantic 모델: 함수 내부 중첩 정의를 모듈 수준으로 이동
 class ProductNameResponse(BaseModel):
@@ -294,10 +325,22 @@ class LangGraphRAGWorkflow:
         self.slm = SLM()
         self.vector_store = VectorStore()
         self.router = IntentRouter()
+        # Guardrail 자료구조 (YAML 로드 후 사용)
+        self._policy_rules: List[PolicyRule] = []
+        self._soft_fix_rules: List[SoftFixRule] = []
+        self._glossary_terms: List[Dict[str, str]] = []
+        self._glossary_regex_terms: List[Dict[str, str]] = []
+        self._glossary_opts: Dict[str, Any] = {}
+        self._glossary_regex_compiled: List[re.Pattern] = []
+
         self.workflow = self._build_workflow()
         # 성능 최적화를 위한 캐시
         self._filename_cache = None
         self._filename_index = None
+
+        # 최소 YAML 로드
+    # 실제 guardrails 폴더의 policy_rules.yaml 경로로 수정
+    self._load_minimal_guardrail_yamls("src/langgraph/guardrails/policy_rules.yaml")
 
     def _build_workflow(self) -> StateGraph:
         """LangGraph 워크플로우 구축 (멀티턴 대화 지원)"""
@@ -313,6 +356,8 @@ class LangGraphRAGWorkflow:
         workflow.add_node("search_documents", self._search_documents)
         workflow.add_node("filter_relevance", self._filter_relevance)
         workflow.add_node("generate_response", self._generate_response)
+        # 🔹 최종 가드레일 노드 추가
+        workflow.add_node("guardrails", self._guardrails_slim_inline)
         workflow.add_node("save_conversation", self._save_conversation)  # 대화 저장
 
         # 엣지 추가 (멀티턴 대화 플로우)
@@ -343,11 +388,188 @@ class LangGraphRAGWorkflow:
         workflow.add_edge("extract_product_name", "search_documents")
         workflow.add_edge("search_documents", "filter_relevance")
         workflow.add_edge("filter_relevance", "generate_response")
-        workflow.add_edge("generate_response", "save_conversation")
+        # 🔹 generate_response → guardrails → save_conversation
+        workflow.add_edge("generate_response", "guardrails")
+        workflow.add_edge("guardrails", "save_conversation")
         workflow.add_edge("save_conversation", END)
 
         return workflow.compile()
 
+    # ------------------------- Guardrail: YAML Loader -------------------------
+    def _load_minimal_guardrail_yamls(self, policy_path: str = "config/policy_rules.yaml"):
+        """policy_rules.yaml + glossary_terms.yaml 로드해서
+        _guardrails_slim_inline이 바로 쓸 수 있게 셋업."""
+        self._policy_rules = []
+        self._soft_fix_rules = []
+        self._glossary_terms = []
+        self._glossary_regex_terms = []
+        self._glossary_opts = {}
+        self._glossary_regex_compiled = []
+
+        if not os.path.exists(policy_path):
+            logger.warning(f"[GUARD] policy file not found: {policy_path}")
+            return
+
+        with open(policy_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        # rules
+        for r in data.get("rules", []) or []:
+            srcs = [PolicySourceRef(**s) for s in (r.get("sources") or [])]
+            rule = PolicyRule(
+                rule_id=r["rule_id"],
+                policy=r.get("policy", "INTERNAL"),
+                severity=r.get("severity", "MEDIUM").upper(),
+                patterns=r.get("patterns", []),
+                disclosures=r.get("disclosures", []) or [],
+                fix_hint=r.get("fix_hint", "") or "",
+                sources=srcs
+            )
+            rule.compiled = [re.compile(p, flags=re.IGNORECASE) for p in rule.patterns]
+            self._policy_rules.append(rule)
+
+        # soft_fixes
+        for sf in data.get("soft_fixes", []) or []:
+            s = SoftFixRule(pattern=sf["pattern"], replacement=sf["replacement"])
+            s.compiled = re.compile(s.pattern, flags=re.IGNORECASE)
+            self._soft_fix_rules.append(s)
+
+        # glossary
+        glossary_file = ((data.get("terminology") or {}).get("normalization") or {}).get("glossary_file")
+        # 경로가 상대경로면 guardrails 폴더 기준으로 보정
+        if glossary_file and not os.path.isabs(glossary_file):
+            glossary_file = os.path.join(os.path.dirname(policy_path), os.path.basename(glossary_file))
+        if glossary_file and os.path.exists(glossary_file):
+            with open(glossary_file, "r", encoding="utf-8") as gf:
+                g = yaml.safe_load(gf) or {}
+            self._glossary_terms = g.get("terms") or []
+            self._glossary_regex_terms = g.get("regex_terms") or []
+            self._glossary_opts = g.get("options") or {}
+            flags = re.IGNORECASE if self._glossary_opts.get("case_insensitive", True) else 0
+            self._glossary_regex_compiled = [
+                re.compile(item["pattern"], flags=flags) for item in (self._glossary_regex_terms or [])
+            ]
+
+        logger.info(f"[GUARD] loaded: rules={len(self._policy_rules)}, soft_fixes={len(self._soft_fix_rules)}, glossary_terms={len(self._glossary_terms)}")
+
+    # ------------------------- Guardrail: Node (inline) -------------------------
+    def _guardrails_slim_inline(self, state: RAGState) -> RAGState:
+        """
+        최종 가드레일(인라인 버전: 헬퍼 호출 없음)
+          - 규칙(YAML: self._policy_rules)으로 응답 검사 → HIGH 있으면 BLOCK
+          - 소프트 치환(self._soft_fix_rules) 적용
+          - 용어 표준화(self._glossary_terms / self._glossary_regex_compiled) 적용
+          - 출처/정확성/누락/강조 등은 수행하지 않음
+        """
+        # (선택) 로더를 이미 호출했으므로 추가 리로드는 생략
+
+        resp = (state.get("response") or "").strip()
+        if not resp:
+            return {
+                **state,
+                "guardrail_decision": "PASS",
+                "violations": [],
+                "compliant_response": state.get("response", "")
+            }
+
+        # 1) 규칙 매칭
+        violations = []
+        for rule in (self._policy_rules or []):
+            for pat in (rule.compiled or []):
+                m = pat.search(resp)
+                if not m:
+                    continue
+                violations.append({
+                    "phase": "post",
+                    "policy": getattr(rule, "policy", "INTERNAL"),
+                    "rule_id": getattr(rule, "rule_id", "UNKNOWN"),
+                    "severity": getattr(rule, "severity", "MEDIUM"),
+                    "evidence": m.group(0),
+                    "fix_hint": getattr(rule, "fix_hint", ""),
+                    "sources": [
+                        {"file": s.file, "clause": s.clause}
+                        for s in (getattr(rule, "sources", []) or [])
+                    ],
+                })
+
+        # HIGH 위반 → BLOCK
+        if any(v.get("severity") == "HIGH" for v in violations):
+            safe = (
+                "해당 내용은 내부 규정·약관 또는 법령에 저촉될 수 있어 일반 정보로만 안내드립니다.\n"
+                "정확한 조건과 절차는 상품설명서·약관 및 공식 채널(영업점/고객센터)에서 확인해 주세요."
+            )
+            return {
+                **state,
+                "guardrail_decision": "BLOCK",
+                "violations": violations,
+                "response": safe,
+                "compliant_response": safe,
+                "sources": state.get("sources", [])
+            }
+
+        # 2) 소프트 치환
+        fixed = resp
+        soft_changed = False
+        for sf in (self._soft_fix_rules or []):
+            try:
+                compiled = getattr(sf, "compiled", None)
+                replacement = getattr(sf, "replacement", "")
+                if compiled and compiled.search(fixed):
+                    fixed = compiled.sub(replacement, fixed)
+                    soft_changed = True
+            except Exception:
+                continue
+
+        # 3) 용어 표준화
+        # 3-1) terms: from → to
+        terms = self._glossary_terms or []
+        if terms:
+            ci = bool((self._glossary_opts or {}).get("case_insensitive", True))
+            wb = bool((self._glossary_opts or {}).get("word_boundary", True))
+            flags = re.IGNORECASE if ci else 0
+            for t in terms:
+                src = t.get("from")
+                dst = t.get("to")
+                if not src or not dst:
+                    continue
+                pat = re.escape(src)
+                if wb:
+                    pat = rf"\b{pat}\b"
+                try:
+                    fixed_new = re.sub(pat, dst, fixed, flags=flags)
+                    if fixed_new != fixed:
+                        fixed = fixed_new
+                        soft_changed = True
+                except Exception:
+                    continue
+
+        # 3-2) regex_terms: pattern → replacement
+        regex_compiled = self._glossary_regex_compiled or []
+        regex_terms = self._glossary_regex_terms or []
+        if regex_compiled and regex_terms:
+            for idx, pat in enumerate(regex_compiled):
+                try:
+                    repl = ""
+                    if idx < len(regex_terms):
+                        repl = regex_terms[idx].get("replacement", "") or ""
+                    fixed_new = pat.sub(repl, fixed)
+                    if fixed_new != fixed:
+                        fixed = fixed_new
+                        soft_changed = True
+                except Exception:
+                    continue
+
+        decision = "SOFT_FIX" if (soft_changed or violations) else "PASS"
+
+        return {
+            **state,
+            "guardrail_decision": decision,
+            "violations": violations,
+            "response": fixed,
+            "compliant_response": fixed,
+        }
+
+    # ------------------------- 기존 로직 -------------------------
     def _session_init(self, state: RAGState) -> RAGState:
         """세션 초기화 및 관리"""
         try:
@@ -871,6 +1093,9 @@ class LangGraphRAGWorkflow:
                 "session_context": session_context,
                 "conversation_history": [],
                 "turn_id": "",
+                "guardrail_decision": "",
+                "violations": [],
+                "compliant_response": "",
             }
 
             # 워크플로우 실행
@@ -901,6 +1126,10 @@ class LangGraphRAGWorkflow:
                 # 호환성 유지
                 "initial_intent": final_state.get("initial_intent", ""),
                 "initial_topic_summary": final_state.get("initial_topic_summary", ""),
+                "guardrail": {
+                    "decision": final_state.get("guardrail_decision", ""),
+                    "violations": final_state.get("violations", []),
+                }
             }
             
             logger.info(f"[GRAPH] Workflow completed for session: {session_context.session_id}")
@@ -923,6 +1152,10 @@ class LangGraphRAGWorkflow:
                 },
                 "initial_intent": "",
                 "initial_topic_summary": "",
+                "guardrail": {
+                    "decision": "error",
+                    "violations": [],
+                }
             }
 
     # 기존 orchestrator의 헬퍼 메서드들 복사
