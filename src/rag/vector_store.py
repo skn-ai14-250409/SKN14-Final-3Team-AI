@@ -275,3 +275,26 @@ class VectorStore:
     def delete_all_vectors(self) -> None:
         vs_index: PineconeVectorStore = self.get_index()
         return vs_index.delete(delete_all=True)
+
+    def get_available_files(self) -> List[str]:
+        """인덱스에서 사용 가능한 파일명 목록 반환"""
+        try:
+            index = self.pc.Index(self.index_name)
+            # 메타데이터에서 고유한 파일명들을 추출
+            query_response = index.query(
+                vector=[0.0] * (1536 if self.embedding_backend == "openai" else 1024),
+                top_k=10000,  # 충분히 큰 수로 설정
+                include_metadata=True
+            )
+            
+            file_names = set()
+            for match in query_response.matches:
+                metadata = match.metadata or {}
+                file_name = metadata.get('file_name')
+                if file_name:
+                    file_names.add(file_name)
+            
+            return list(file_names)
+        except Exception as e:
+            logger.error(f"Failed to get available files: {e}")
+            return []
