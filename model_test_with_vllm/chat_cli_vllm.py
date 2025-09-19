@@ -12,7 +12,7 @@ client = OpenAI(
 )
 
 # vLLM 서버에 올라가 있는 모델의 ID
-MODEL_ID = "rucipheryn/Qwen2.5-14B-KB-Finance-LoRA-v2-Merged"
+MODEL_ID = "sssssungjae/qwen2_5-7b-instruct-finance-full-final-15_15"
 
 
 # --- 2. 메인 대화 루프 ---
@@ -70,8 +70,10 @@ def main():
             response = client.chat.completions.create(
                 model=MODEL_ID,
                 messages=messages,
-                max_tokens=1024,
+                max_tokens=4096,
                 temperature=0.7,
+                top_p=0.8,
+                do_sample=True
             )
             
             # 4. 답변 추출 및 출력
