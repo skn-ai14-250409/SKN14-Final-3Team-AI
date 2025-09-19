@@ -43,7 +43,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("서버가 사용자에 의해 중단되었습니다.")
     except Exception as e:
-        logger.error(f"서버 실행 중 오류가 발생했습니다: {e}")
+        logger.error(f"서버 실행 중 오류가 발생했습니다: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()

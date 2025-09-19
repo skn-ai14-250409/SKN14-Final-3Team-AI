@@ -339,8 +339,8 @@ class LangGraphRAGWorkflow:
         self._filename_index = None
 
         # 최소 YAML 로드
-    # 실제 guardrails 폴더의 policy_rules.yaml 경로로 수정
-    self._load_minimal_guardrail_yamls("src/langgraph/guardrails/policy_rules.yaml")
+        # 실제 guardrails 폴더의 policy_rules.yaml 경로로 수정
+        self._load_minimal_guardrail_yamls("src/langgraph/guardrails/policy_rules.yaml")
 
     def _build_workflow(self) -> StateGraph:
         """LangGraph 워크플로우 구축 (멀티턴 대화 지원)"""
@@ -360,19 +360,9 @@ class LangGraphRAGWorkflow:
         workflow.add_node("guardrails", self._guardrails_slim_inline)
         workflow.add_node("save_conversation", self._save_conversation)  # 대화 저장
 
-        # 엣지 추가 (멀티턴 대화 플로우)
+        # 엣지 추가 (단순화된 플로우)
         workflow.add_edge(START, "session_init")
-        workflow.add_edge("session_init", "context_analysis")
-        
-        workflow.add_conditional_edges(
-            "context_analysis",
-            self._route_by_context,
-            {
-                "first_turn": "first_turn_preprocess",
-                "continue_turn": "classify_intent"
-            }
-        )
-        
+        workflow.add_edge("session_init", "first_turn_preprocess")  # context_analysis 우회
         workflow.add_edge("first_turn_preprocess", "classify_intent")
 
         workflow.add_conditional_edges(
@@ -495,8 +485,7 @@ class LangGraphRAGWorkflow:
         # HIGH 위반 → BLOCK
         if any(v.get("severity") == "HIGH" for v in violations):
             safe = (
-                "해당 내용은 내부 규정·약관 또는 법령에 저촉될 수 있어 일반 정보로만 안내드립니다.\n"
-                "정확한 조건과 절차는 상품설명서·약관 및 공식 채널(영업점/고객센터)에서 확인해 주세요."
+                "죄송하지만 해당 질문은 내부 기준상 구체적으로 답변드리기 어렵습니다."
             )
             return {
                 **state,
@@ -620,13 +609,23 @@ class LangGraphRAGWorkflow:
             conversation_history = state.get("conversation_history", [])
             query = state.get("query", "")
             
+            logger.info(f"[GRAPH] Context analysis - session_id: {session_context.session_id if session_context else 'None'}, conversation_history length: {len(conversation_history)}")
+            
             if not session_context:
+                logger.info(f"[GRAPH] No session context - routing to first_turn")
                 return {**state, "context_route": "first_turn"}
             
             # 첫 턴인지 확인
             if not conversation_history:
                 logger.info(f"[GRAPH] First turn detected for session: {session_context.session_id}")
                 return {**state, "context_route": "first_turn"}
+            else:
+                logger.info(f"[GRAPH] Continue turn - conversation history exists: {len(conversation_history)} turns")
+                logger.info(f"[GRAPH] Conversation history content: {[turn.turn_id for turn in conversation_history]}")
+            
+            # 임시로 항상 first_turn으로 라우팅 (디버깅용)
+            logger.info(f"[GRAPH] FORCE ROUTING TO FIRST_TURN FOR DEBUGGING")
+            return {**state, "context_route": "first_turn"}
             
             # 이전 대화 맥락 분석
             last_turn = conversation_history[-1]
@@ -757,11 +756,65 @@ class LangGraphRAGWorkflow:
         session_context = state.get("session_context")
         conversation_history = state.get("conversation_history", [])
         
-        # 이미 대화가 있었다면 그대로 반환 (세션 내 1회 실행)
-        if conversation_history:
+        logger.info(f"[GRAPH] First turn preprocess - conversation_history length: {len(conversation_history)}")
+        
+        # 첫 턴인지 확인 (conversation_history가 비어있거나 현재 턴이 첫 번째인 경우)
+        is_first_turn = not conversation_history or len(conversation_history) == 0
+        
+        if not is_first_turn:
+            logger.info(f"[GRAPH] Skipping first turn preprocess - conversation already exists")
             return state
 
         query = state.get("query", "") or ""
+        
+        # 제목 생성: LLM 호출 (최대 15자 제한)
+        logger.info(f"[GRAPH] FIRST_TURN_PREPROCESS EXECUTING - Query: {query[:50]}...")
+        
+        system_message = SystemMessage(
+            "당신은 '챗봇 세션 제목 생성기'입니다. 사용자의 질문을 보고 "
+            "이 세션을 대표할 매우 간결한 한 줄 제목을 생성하세요."
+        )
+        human_prompt = (
+            f"사용자 질문: {query}\n\n"
+            "출력: 제목 텍스트만 한 줄로 출력\n"
+            "- 한국어로 간결하게 (최대 15자)\n"
+            "- 불필요한 설명 없이 제목만 반환\n"
+        )
+        messages = [system_message, HumanMessage(human_prompt)]
+
+        session_title = ""
+        MAX_TITLE_CHARS = 15  # 15자로 제한
+
+        try:
+            logger.info(f"[GRAPH] Generating title for query: {query[:50]}...")
+            raw = (self.slm.invoke(messages) or "").strip()
+            logger.info(f"[GRAPH] Raw title response: {raw[:100]}...")
+            if raw:
+                session_title = raw.splitlines()[0].strip()
+                if len(session_title) > MAX_TITLE_CHARS:
+                    session_title = session_title[:MAX_TITLE_CHARS].rstrip()
+                logger.info(f"[GRAPH] Generated title: {session_title}")
+            else:
+                logger.warning(f"[GRAPH] Empty title response from SLM")
+        except Exception as e:
+            # 최소 폴백: intent 또는 질문의 앞부분 사용
+            logger.warning(f"[GRAPH] first_turn_preprocess: title generation failed: {e}")
+            session_title = ""
+
+        if not session_title:
+            # LLM 실패 또는 빈 결과일 때 폴백: intent 우선, 없으면 질문 앞부분
+            session_title = initial_intent or (query.strip().splitlines()[0][:MAX_TITLE_CHARS] or "새로운 질문")
+            logger.info(f"[GRAPH] Using fallback title: {session_title}")
+        
+        # 최종 보장: 제목이 절대 비어있지 않도록
+        if not session_title or session_title.strip() == "":
+            session_title = "새로운 질문"
+            logger.info(f"[GRAPH] Final fallback title: {session_title}")
+        
+        # 15자 제한 적용
+        if len(session_title) > MAX_TITLE_CHARS:
+            session_title = session_title[:MAX_TITLE_CHARS].rstrip()
+        
         
         # Router 호출 - 안전한 예외 처리
         try:
@@ -774,37 +827,6 @@ class LangGraphRAGWorkflow:
         except Exception as e:
             logger.error(f"[GRAPH] Router failed for query '{query[:100]}...': {e}")
             initial_intent = "unknown"
-
-        # 제목 생성: LLM 호출만 한 번의 예외 처리 (운영상 폴백 허용)
-        system_message = SystemMessage(
-            "당신은 '챗봇 세션 제목 생성기'입니다. 사용자의 질문을 보고 "
-            "이 세션을 대표할 매우 간결한 한 줄 제목을 생성하세요."
-        )
-        human_prompt = (
-            f"사용자 질문: {query}\n\n"
-            "출력: 제목 텍스트만 한 줄로 출력\n"
-            "- 한국어로 간결하게 (17 어절 권장)\n"
-            "- 불필요한 설명 없이 제목만 반환\n"
-        )
-        messages = [system_message, HumanMessage(human_prompt)]
-
-        session_title = ""
-        MAX_TITLE_CHARS = 60
-
-        try:
-            raw = (self.slm.invoke(messages) or "").strip()
-            if raw:
-                session_title = raw.splitlines()[0].strip()
-                if len(session_title) > MAX_TITLE_CHARS:
-                    session_title = session_title[:MAX_TITLE_CHARS].rstrip() + "..."
-        except Exception as e:
-            # 최소 폴백: intent 또는 질문의 앞부분 사용
-            logger.warning(f"[GRAPH] first_turn_preprocess: title generation failed: {e}")
-            session_title = ""
-
-        if not session_title:
-            # LLM 실패 또는 빈 결과일 때 폴백: intent 우선, 없으면 질문 앞부분
-            session_title = initial_intent or (query.strip().splitlines()[0][:MAX_TITLE_CHARS] or "새로운 질문")
 
         # 세션 컨텍스트 업데이트
         if session_context:
@@ -826,8 +848,10 @@ class LangGraphRAGWorkflow:
         }
 
     def _classify_intent(self, state: RAGState) -> RAGState:
-        """인텐트 분류 노드 - 강화된 에러 처리"""
+        """인텐트 분류 노드 - 강화된 에러 처리 (제목 생성 포함)"""
         query = state["query"]
+        session_context = state.get("session_context")
+        conversation_history = state.get("conversation_history", [])
         
         try:
             category = self.router.route_prompt(query)
@@ -840,11 +864,16 @@ class LangGraphRAGWorkflow:
             logger.error(f"[GRAPH] Intent classification failed for query '{query[:100]}...': {e}")
             category = "unknown"
 
+        # 첫 턴인 경우 제목 생성은 run_workflow에서 처리
+        session_title = ""
+
         logger.info(f"[GRAPH] Classified category: {category}")
 
         return {
             **state,
-            "category": category
+            "category": category,
+            "initial_intent": category,
+            "initial_topic_summary": session_title
         }
 
     def _route_by_category(self, state: RAGState) -> str:
@@ -1109,6 +1138,58 @@ class LangGraphRAGWorkflow:
                     last_activity=datetime.now()
                 )
 
+            # 제목 생성 (첫 턴인 경우)
+            conversation_history = session_manager.get_conversation_history(session_context.session_id)
+            initial_topic_summary = final_state.get("initial_topic_summary", "")
+            
+            # LLM으로 제목 생성 (첫 턴인 경우)
+            if not conversation_history and not initial_topic_summary:
+                logger.info(f"[GRAPH] Generating title with LLM for first turn")
+                
+                try:
+                    # LLM으로 제목 생성
+                    system_message = SystemMessage(
+                        "당신은 '챗봇 세션 제목 생성기'입니다. 사용자의 질문을 보고 "
+                        "이 세션을 대표할 매우 간결한 한 줄 제목을 생성하세요."
+                    )
+                    human_prompt = (
+                        f"사용자 질문: {query}\n\n"
+                        "출력: 제목 텍스트만 한 줄로 출력\n"
+                        "- 한국어로 간결하게 (반드시 15자 이하)\n"
+                        "- 불필요한 설명 없이 제목만 반환\n"
+                        "- 예시: '햇살론 문의', '대출 문의', '상품 안내'\n"
+                        "- 중요: 15자를 초과하면 안됩니다!\n"
+                    )
+                    messages = [system_message, HumanMessage(human_prompt)]
+                    
+                    raw_title = (self.slm.invoke(messages) or "").strip()
+                    if raw_title:
+                        initial_topic_summary = raw_title.splitlines()[0].strip()
+                        # 15자 제한 강제 적용
+                        if len(initial_topic_summary) > 15:
+                            initial_topic_summary = initial_topic_summary[:15].rstrip()
+                            logger.info(f"[GRAPH] Title truncated to 15 chars: {initial_topic_summary}")
+                    else:
+                        # LLM 실패시 폴백
+                        initial_topic_summary = query[:15] if len(query) > 15 else query
+                    
+                    # 세션에 제목 저장
+                    session_manager.update_session(
+                        session_context.session_id,
+                        session_title=initial_topic_summary
+                    )
+                    
+                    logger.info(f"[GRAPH] LLM generated title: {initial_topic_summary}")
+                    
+                except Exception as e:
+                    logger.error(f"[GRAPH] LLM title generation failed: {e}")
+                    # 폴백: 질문 앞부분 사용
+                    initial_topic_summary = query[:15] if len(query) > 15 else query
+                    session_manager.update_session(
+                        session_context.session_id,
+                        session_title=initial_topic_summary
+                    )
+
             # 응답 구성
             response_data = {
                 "response": final_state["response"],
@@ -1118,14 +1199,14 @@ class LangGraphRAGWorkflow:
                 "session_info": {
                     "session_id": updated_session.session_id if updated_session else session_context.session_id,
                     "initial_intent": final_state.get("initial_intent", ""),
-                    "initial_topic_summary": final_state.get("initial_topic_summary", ""),
+                    "initial_topic_summary": initial_topic_summary,
                     "conversation_mode": updated_session.conversation_mode if updated_session else "normal",
                     "current_topic": updated_session.current_topic if updated_session else "",
                     "active_product": updated_session.active_product if updated_session else "",
                 },
                 # 호환성 유지
                 "initial_intent": final_state.get("initial_intent", ""),
-                "initial_topic_summary": final_state.get("initial_topic_summary", ""),
+                "initial_topic_summary": initial_topic_summary,
                 "guardrail": {
                     "decision": final_state.get("guardrail_decision", ""),
                     "violations": final_state.get("violations", []),
