@@ -1,0 +1,19 @@
+# --- Core Libraries ---
+# PyTorch와 CUDA (기본)
+torch
+transformers
+# .env 파일 로드 및 허깅페이스 통신
+python-dotenv
+huggingface_hub
+# 모델의 효율적인 로딩 및 분산을 위해 필요
+accelerate
+
+# --- PEFT (LoRA) ---
+# LoRA 모델 병합 및 처리에 필요
+peft
+
+# --- vLLM Serving ---
+# 고속 추론 서버 구축에 필요
+vllm
+# vLLM 서버(OpenAI 호환 API)와 통신하는 클라이언트에 필요
+openai
