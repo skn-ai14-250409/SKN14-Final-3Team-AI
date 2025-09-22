@@ -129,8 +129,11 @@ class RAGAgent:
             logger.debug("Executing workflow with interrupt handling")
             result = self.workflow.invoke(input_data, config=config)
             
+            # 워크플로우 실행 완료
+            logger.info("[WORKFLOW] Execution completed successfully")
+            
             # Extract response message for presentation
-            response_message = result.get("response", "")
+            response_message = result.get("response", "") if isinstance(result, dict) else ""
             
             # Check for clarification needs
             if result.get("needs_clarification") and result.get("clarification_question"):
@@ -186,8 +189,11 @@ class RAGAgent:
             return {
                 "success": False,
                 "status": "error",
-                "error": f"Workflow execution failed: {str(e)}",
-                "session_id": input_data.get("session_id")
+                "error": f"LangGraph V2 RAG 처리 중 오류가 발생했습니다: {str(e)}",
+                "session_id": input_data.get("session_id"),
+                "response": f"죄송합니다. 처리 중 오류가 발생했습니다: {str(e)}",
+                "messages": [],
+                "sources": []
             }
     
     def _stream_execution(
