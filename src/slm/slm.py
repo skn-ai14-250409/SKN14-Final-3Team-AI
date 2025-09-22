@@ -8,7 +8,11 @@ class SLM:
     def __init__(self):
         self.llm = ChatOpenAI(
                 model=MODEL_NAME,
-                api_key=MODEL_KEY
+                api_key=MODEL_KEY,
+                temperature=0.1,  # 일관성 향상 및 속도 개선
+                max_tokens=500,   # 응답 길이 더 제한 (1000 → 500)
+                request_timeout=10,  # 타임아웃 더 짧게 (15 → 10)
+                max_retries=1  # 재시도 횟수 더 제한 (2 → 1)
             )
     
     def invoke(
