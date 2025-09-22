@@ -121,7 +121,7 @@ def create_rag_workflow(
     workflow.add_conditional_edges(
         SUPERVISOR,
         supervisor_router,
-        ["general_faq", "rag_search", "product_extraction", "product_search", "guardrail_check", "answer"]
+        ["general_faq", "rag_search", "product_extraction", "product_search", "answer"]
     )
     
     # General FAQ node for banking questions
@@ -154,17 +154,17 @@ def create_rag_workflow(
     workflow.add_node(RAG_SEARCH, rag_search_with_slm)
     workflow.add_edge(RAG_SEARCH, ANSWER)
     
-    # Guardrail check node
-    guardrail_check_with_slm = partial(guardrail_check_node, slm=slm)
-    workflow.add_node(GUARDRAIL_CHECK, guardrail_check_with_slm)
-    workflow.add_edge(GUARDRAIL_CHECK, ANSWER)
-    
     # Answer node - final response generation
     workflow.add_node(ANSWER, answer_node)
-    workflow.add_edge(ANSWER, END)
+    workflow.add_edge(ANSWER, GUARDRAIL_CHECK)
+    
+    # Guardrail check node - 모든 답변 후 자동 실행
+    guardrail_check_with_slm = partial(guardrail_check_node, slm=slm)
+    workflow.add_node(GUARDRAIL_CHECK, guardrail_check_with_slm)
+    workflow.add_edge(GUARDRAIL_CHECK, END)
     
     # Compile workflow with tools for proper tool calling
-    from .tools import general_faq, rag_search, product_extraction, product_search, guardrail_check, answer, intent_classification
+    from .tools import general_faq, rag_search, product_extraction, product_search, answer
     
     return workflow.compile(
         checkpointer=checkpointer or MemorySaver(),
