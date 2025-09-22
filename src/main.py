@@ -7,10 +7,27 @@ from src.api.router import router
 
 # 로깅 설정
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.DEBUG,  # DEBUG 레벨로 변경
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),  # 콘솔 출력
+        logging.FileHandler("app.log", encoding="utf-8")  # 파일 출력
+    ],
+    force=True  # 기존 설정 강제 덮어쓰기
 )
 logger = logging.getLogger(__name__)
+
+# 모든 로거 레벨 설정
+logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger("src").setLevel(logging.DEBUG)
+logging.getLogger("src.langgraph").setLevel(logging.DEBUG)
+logging.getLogger("src.rag").setLevel(logging.DEBUG)
+logging.getLogger("src.slm").setLevel(logging.DEBUG)
+logging.getLogger("src.api").setLevel(logging.DEBUG)
+
+# 특정 모듈 로깅 활성화
+logging.getLogger("src.langgraph.nodes").setLevel(logging.DEBUG)
+logging.getLogger("src.langgraph.agent").setLevel(logging.DEBUG)
 
 app = FastAPI(
     title="KB금융 RAG API",

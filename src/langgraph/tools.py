@@ -7,16 +7,6 @@ RAG 워크플로우에서 사용하는 도구들
 from langchain_core.tools import tool
 
 @tool(parse_docstring=True)
-def chitchat(thought: str, message: str):
-    """
-    Handle casual conversation, greetings, thanks, and general chat.
-    
-    Args:
-        thought: Reasoning for using this tool (1-3 sentences)
-        message: User's message content for chitchat response
-    """
-
-@tool(parse_docstring=True)
 def general_faq(thought: str, question: str):
     """
     Answer general banking FAQ questions using SLM knowledge.

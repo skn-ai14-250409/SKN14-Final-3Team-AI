@@ -13,7 +13,6 @@ from src.config import VECTOR_STORE_INDEX_NAME, DATA_FOLDER_PATH
 from src.constants import STATUS_SUCCESS, STATUS_FAIL
 
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -217,33 +216,50 @@ async def langgraph_rag(input: LangGraphRAGInput):
     - 가드레일 검사
     - 세션 관리 지원
     """
-    logger.info(f"[LANGGRAPH RAG] RAG query: {input.prompt[:100]}... (session_id: {input.session_id})")
+    logger.info(f"[API] Query: '{input.prompt[:50]}...' | Session: {input.session_id}")
     
     try:
+        import time
+        start_time = time.time()
+        
         workflow = get_langgraph_workflow()
         result = workflow.run_workflow(input.prompt, input.session_id)
         
-        # 세션 제목 로깅
-        session_title = result.get("initial_topic_summary", "")
-        logger.info(f"[LANGGRAPH RAG] Session title: '{session_title}'")
+        end_time = time.time()
+        response_time = end_time - start_time
         
-        # 세션 정보에 session_title 추가
-        session_info = result.get("session_info", {})
-        if result.get("initial_topic_summary"):
+        # 응답 완료 로깅
+        session_title = result.get("initial_topic_summary", "") if isinstance(result, dict) else ""
+        logger.info(f"[API] Response time: {response_time:.2f}s | Title: '{session_title}'")
+        
+        # 세션 정보에 session_title 추가 (안전한 처리)
+        session_info = result.get("session_info", {}) if isinstance(result, dict) else {}
+        if isinstance(result, dict) and result.get("initial_topic_summary"):
             session_info["session_title"] = result.get("initial_topic_summary")
+        
+        # 안전한 응답 데이터 구성
+        response_text = result.get("response", "") if isinstance(result, dict) else ""
+        sources = result.get("sources", []) if isinstance(result, dict) else []
+        category = result.get("category", "") if isinstance(result, dict) else ""
+        product_name = result.get("product_name", "") if isinstance(result, dict) else ""
+        initial_intent = result.get("initial_intent", "") if isinstance(result, dict) else ""
+        initial_topic_summary = result.get("initial_topic_summary", "") if isinstance(result, dict) else ""
+        conversation_mode = result.get("conversation_mode", "tool_calling") if isinstance(result, dict) else "tool_calling"
+        current_topic = result.get("current_topic", "") if isinstance(result, dict) else ""
+        active_product = result.get("active_product", "") if isinstance(result, dict) else ""
         
         response_data = LangGraphRAGResponse(
             status=STATUS_SUCCESS,
-            response=result["response"],
-            sources=result.get("sources", []),
-            category=result.get("category", ""),
-            product_name=result.get("product_name", ""),
+            response=response_text,
+            sources=sources,
+            category=category,
+            product_name=product_name,
             session_info=session_info,
-            initial_intent=result.get("initial_intent", ""),
-            initial_topic_summary=result.get("initial_topic_summary", ""),
-            conversation_mode=result.get("conversation_mode", "tool_calling"),
-            current_topic=result.get("current_topic", ""),
-            active_product=result.get("active_product", "")
+            initial_intent=initial_intent,
+            initial_topic_summary=initial_topic_summary,
+            conversation_mode=conversation_mode,
+            current_topic=current_topic,
+            active_product=active_product
         )
         
         # UTF-8 인코딩으로 JSON 응답 반환

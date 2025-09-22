@@ -6,6 +6,7 @@ routing, and subgraph composition.
 """
 
 import json
+import logging
 from typing import Dict, Any, Optional, List
 from functools import partial
 
@@ -22,7 +23,6 @@ from .nodes import (
     intent_classification_node,
     supervisor_node,
     supervisor_router,
-    chitchat_node,
     general_faq_node,
     product_extraction_node,
     product_search_node,
@@ -33,6 +33,7 @@ from .nodes import (
 )
 from ..slm.slm import SLM
 
+logger = logging.getLogger(__name__)
 
 # ========== Node Constants ==========
 
@@ -40,7 +41,6 @@ from ..slm.slm import SLM
 SESSION_INIT = "session_init"
 INTENT_CLASSIFICATION = "intent_classification"
 SUPERVISOR = "supervisor"
-CHITCHAT = "chitchat"
 GENERAL_FAQ = "general_faq"
 PRODUCT_EXTRACTION = "product_extraction"
 PRODUCT_SEARCH = "product_search"
@@ -65,6 +65,8 @@ def join_graph(response: dict) -> dict:
 def start_router(state: RAGState) -> list[str]:
     """Initial routing - always go to session_init"""
     return [SESSION_INIT]
+
+
 
 
 # ========== Main Graph Factory Function ==========
@@ -102,23 +104,25 @@ def create_rag_workflow(
     workflow.add_node(INTENT_CLASSIFICATION, intent_classification_with_slm)
     workflow.add_edge(SESSION_INIT, INTENT_CLASSIFICATION)
     
-    # Direct to supervisor after intent classification
-    workflow.add_edge(INTENT_CLASSIFICATION, SUPERVISOR)
+    # Conditional routing after intent classification
+    # First turn: INTENT_CLASSIFICATION -> SESSION_SUMMARY
+    # Subsequent turns: INTENT_CLASSIFICATION -> SUPERVISOR
+    workflow.add_conditional_edges(
+        INTENT_CLASSIFICATION,
+        lambda state: "session_summary" if not state.get("conversation_history", []) else "supervisor",
+        ["session_summary", "supervisor"]
+    )
     
-    # Supervisor node - LLM-based routing only
+    # Supervisor node - LLM-based routing with tool calling
     supervisor_with_llm = partial(supervisor_node, llm=llm, slm=slm)
     workflow.add_node(SUPERVISOR, supervisor_with_llm)
     
+    # SUPERVISOR는 도구 선택 후 supervisor_router로 라우팅
     workflow.add_conditional_edges(
         SUPERVISOR,
         supervisor_router,
-        [CHITCHAT, GENERAL_FAQ, PRODUCT_EXTRACTION, PRODUCT_SEARCH, SESSION_SUMMARY, RAG_SEARCH, GUARDRAIL_CHECK, INTENT_CLASSIFICATION, ANSWER]
+        ["general_faq", "rag_search", "product_extraction", "product_search", "answer"]
     )
-    
-    # Chitchat node for casual conversations
-    chitchat_with_slm = partial(chitchat_node, slm=slm)
-    workflow.add_node(CHITCHAT, chitchat_with_slm)
-    workflow.add_edge(CHITCHAT, ANSWER)
     
     # General FAQ node for banking questions
     general_faq_with_slm = partial(general_faq_node, slm=slm)
@@ -138,7 +142,9 @@ def create_rag_workflow(
     # Session summary node for first turn
     session_summary_with_slm = partial(session_summary_node, slm=slm)
     workflow.add_node(SESSION_SUMMARY, session_summary_with_slm)
-    workflow.add_edge(SESSION_SUMMARY, RAG_SEARCH)
+    
+    # SESSION_SUMMARY 후 SUPERVISOR로 라우팅
+    workflow.add_edge(SESSION_SUMMARY, SUPERVISOR)
     
     # RAG search node (VectorStore 인스턴스 재사용)
     from ..rag.vector_store import VectorStore
@@ -148,16 +154,18 @@ def create_rag_workflow(
     workflow.add_node(RAG_SEARCH, rag_search_with_slm)
     workflow.add_edge(RAG_SEARCH, ANSWER)
     
-    # Guardrail check node
-    guardrail_check_with_slm = partial(guardrail_check_node, slm=slm)
-    workflow.add_node(GUARDRAIL_CHECK, guardrail_check_with_slm)
-    workflow.add_edge(GUARDRAIL_CHECK, ANSWER)
-    
     # Answer node - final response generation
     workflow.add_node(ANSWER, answer_node)
-    workflow.add_edge(ANSWER, END)
+    workflow.add_edge(ANSWER, GUARDRAIL_CHECK)
     
-    # Compile workflow (성능 최적화를 위해 디버그 모드 비활성화)
+    # Guardrail check node - 모든 답변 후 자동 실행
+    guardrail_check_with_slm = partial(guardrail_check_node, slm=slm)
+    workflow.add_node(GUARDRAIL_CHECK, guardrail_check_with_slm)
+    workflow.add_edge(GUARDRAIL_CHECK, END)
+    
+    # Compile workflow with tools for proper tool calling
+    from .tools import general_faq, rag_search, product_extraction, product_search, answer
+    
     return workflow.compile(
         checkpointer=checkpointer or MemorySaver(),
         debug=False

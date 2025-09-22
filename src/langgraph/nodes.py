@@ -6,6 +6,7 @@ RAG 워크플로우의 노드 함수들
 
 import logging
 import time
+import re
 from typing import Dict, List, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -30,6 +31,28 @@ from ..slm.slm import SLM
 from ..rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+# ========== Utility Functions ==========
+
+def clean_markdown_formatting(text: str) -> str:
+    """마크다운 형식을 제거하고 일반 텍스트로 변환"""
+    if not text:
+        return text
+    
+    # 마크다운 형식 제거
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # **bold** -> bold
+    text = re.sub(r'\*(.*?)\*', r'\1', text)      # *italic* -> italic
+    text = re.sub(r'#+\s*', '', text)             # # headers -> headers
+    text = re.sub(r'`(.*?)`', r'\1', text)        # `code` -> code
+    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)  # [text](url) -> text
+    text = re.sub(r'^\s*[-*+]\s*', '', text, flags=re.MULTILINE)  # bullet points
+    text = re.sub(r'^\s*\d+\.\s*', '', text, flags=re.MULTILINE)  # numbered lists
+    
+    # 불필요한 공백 정리
+    text = re.sub(r'\n\s*\n', '\n\n', text)  # 여러 줄바꿈을 두 개로 제한
+    text = text.strip()
+    
+    return text
 
 # ========== Node Functions ==========
 
@@ -62,7 +85,15 @@ def session_init_node(state: RAGState) -> RAGState:
             "initial_intent": "",
             "current_topic": "",
             "active_product": "",
-            "session_title": ""  # session_title 초기화
+            "session_title": "",  # session_title 초기화
+            "response": "",  # response 초기화
+            "sources": [],  # sources 초기화
+            "retrieved_docs": [],  # retrieved_docs 초기화
+            "context_text": "",  # context_text 초기화
+            "ready_to_answer": False,  # ready_to_answer 초기화
+            "guardrail_decision": "",  # guardrail_decision 초기화
+            "violations": [],  # violations 초기화
+            "compliant_response": ""  # compliant_response 초기화
         }
         
     except Exception as e:
@@ -85,36 +116,36 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
     if slm is None:
         slm = SLM()
     
-    # 사용 가능한 툴들
-    from .tools import chitchat, general_faq, rag_search, product_extraction, product_search, session_summary, guardrail_check, answer, intent_classification
-    tool_functions = [chitchat, general_faq, rag_search, product_extraction, product_search, session_summary, guardrail_check, answer, intent_classification]
-    
     # 첫 대화인지 확인 (conversation_history가 비어있을 때만)
     conversation_history = state.get("conversation_history", [])
     session_title = session_context.session_title if session_context else ""
     is_first_turn = not conversation_history or len(conversation_history) == 0
     
-    logger.info(f"Conversation history: {conversation_history}")
-    logger.info(f"Session title from context: '{session_title}'")
-    logger.info(f"Is first turn: {is_first_turn}")
+    logger.info(f"[SUPERVISOR] Query: '{query}' | First turn: {is_first_turn}")
+
+    # 첫 번째 턴일 때: session_summary 제외한 도구들 사용 (이미 SESSION_SUMMARY 노드에서 처리됨)
+    if is_first_turn:
+        logger.info("[SUPERVISOR] First turn: Using tools (excluding session_summary)")
+        from .tools import general_faq, rag_search, product_extraction, product_search, answer
+        tool_functions = [general_faq, rag_search, product_extraction, product_search, answer]
+    else:
+        # 두 번째 턴 이후: session_summary, intent_classification 제외한 도구들만 사용
+        logger.info("[SUPERVISOR] Multi-turn: Using limited tools")
+        from .tools import general_faq, rag_search, product_extraction, product_search, answer
+        tool_functions = [general_faq, rag_search, product_extraction, product_search, answer]
+    
+    logger.info(f"Available tools: {[tool.name for tool in tool_functions]}")
 
     # 이미 분류된 의도 사용 (intent_classification_node에서 설정됨)
     intent_category = state.get("intent_category", "general_banking_FAQs")
-    logger.info(f"Using intent category: {intent_category}")
     
     # 응답이 이미 생성되었는지 확인
     current_response = state.get("response", "")
     has_response = bool(current_response.strip())
-
-    logger.info(f"Current response: {current_response}")
-    logger.info(f"Has response: {has_response}")
     
     # 상품명이 추출되었는지 확인
     extracted_product = state.get("product_name", "")
     has_product_name = bool(extracted_product.strip()) and extracted_product != "일반"
-    
-    logger.info(f"Extracted product: {extracted_product}")
-    logger.info(f"Has product name: {has_product_name}")
     
     # 슈퍼바이저 프롬프트 생성
     supervisor_prompt = create_supervisor_prompt(
@@ -127,8 +158,117 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
     )
 
     try:
-        # LLM으로 툴 선택 (첫 번째 턴은 router에서 처리)
+        # LLM으로 툴 선택
         result = slm.llm.bind_tools(tool_functions, tool_choice="required").invoke(supervisor_prompt)
+        
+        # 도구 실행 결과를 state에 저장
+        if hasattr(result, 'tool_calls') and result.tool_calls:
+            tool_name = result.tool_calls[0]['name']
+            tool_args = result.tool_calls[0]['args']
+            
+            logger.info(f"[SUPERVISOR] Selected tool: {tool_name} with args: {tool_args}")
+            
+            # 도구 실행
+            if tool_name == "general_faq":
+                response = create_simple_response(slm, query, "faq_system")
+                response = clean_markdown_formatting(response)
+                return {
+                    **state,
+                    "messages": [result],
+                    "response": response,
+                    "ready_to_answer": True,
+                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+                    "intent_category": intent_category,
+                }
+            elif tool_name == "rag_search":
+                # RAG 검색 실행
+                from ..rag.vector_store import VectorStore
+                vector_store = VectorStore()
+                vector_store.get_index_ready()
+                retrieved_docs = vector_store.similarity_search(query, k=3)
+                response, sources = create_rag_response(slm, query, retrieved_docs)
+                response = clean_markdown_formatting(response)
+                return {
+                    **state,
+                    "messages": [result],
+                    "response": response,
+                    "sources": sources,
+                    "retrieved_docs": retrieved_docs,
+                    "context_text": format_context(retrieved_docs) if retrieved_docs else "",
+                    "ready_to_answer": True,
+                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+                    "intent_category": intent_category,
+                }
+            elif tool_name == "product_extraction":
+                # 상품명 추출 실행
+                extracted_product = extract_product_name(slm, query)
+                sub_category = classify_product_subcategory(extracted_product)
+                return {
+                    **state,
+                    "messages": [result],
+                    "product_name": extracted_product,
+                    "product_extraction_result": {
+                        "product_name": extracted_product,
+                        "sub_category": sub_category,
+                        "confidence": 0.9,
+                        "reasoning": f"상품명 '{extracted_product}'을 추출하고 '{sub_category}'로 분류"
+                    },
+                    "ready_to_answer": False,  # product_search로 이어져야 함
+                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+                    "intent_category": intent_category,
+                }
+            elif tool_name == "product_search":
+                # 상품 검색 실행
+                from ..rag.vector_store import VectorStore
+                vector_store = VectorStore()
+                vector_store.get_index_ready()
+                product_name = state.get("product_name", "")
+                
+                if not product_name or product_name == "일반":
+                    retrieved_docs = vector_store.similarity_search(query, k=3)
+                else:
+                    # 상품명으로 필터링 시도
+                    filter_attempts = [
+                        {"product_name": product_name},
+                        {"keywords": {"$in": [product_name]}},
+                        {"file_name": {"$regex": product_name, "$options": "i"}},
+                        {"product_type": product_name}
+                    ]
+                    
+                    retrieved_docs = []
+                    for filter_dict in filter_attempts:
+                        try:
+                            retrieved_docs = vector_store.similarity_search(query, k=3, filter_dict=filter_dict)
+                            if retrieved_docs:
+                                break
+                        except Exception:
+                            continue
+                    
+                    if not retrieved_docs:
+                        retrieved_docs = vector_store.similarity_search(query, k=3)
+                
+                response, sources = create_rag_response(slm, query, retrieved_docs)
+                response = clean_markdown_formatting(response)
+                return {
+                    **state,
+                    "messages": [result],
+                    "response": response,
+                    "sources": sources,
+                    "retrieved_docs": retrieved_docs,
+                    "context_text": format_context(retrieved_docs) if retrieved_docs else "",
+                    "ready_to_answer": True,
+                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+                    "intent_category": intent_category,
+                }
+            elif tool_name == "answer":
+                # 직접 답변
+                return {
+                    **state,
+                    "messages": [result],
+                    "ready_to_answer": True,
+                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+                    "intent_category": intent_category,
+                }
         
         return {
             **state,
@@ -148,73 +288,40 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
 def supervisor_router(state: RAGState) -> str:
     """슈퍼바이저 라우터"""
     logger.info("[ROUTER] supervisor_router 실행 시작")
+    logger.info(f"[ROUTER] State keys: {list(state.keys())}")
+    logger.info(f"[ROUTER] ready_to_answer: {state.get('ready_to_answer')}")
+    
+    # messages에서 마지막 메시지 확인
+    messages = state.get("messages", [])
+    if messages:
+        last_message = messages[-1]
+        logger.info(f"[ROUTER] Last message type: {type(last_message)}")
+        logger.info(f"[ROUTER] Last message content: {getattr(last_message, 'content', 'No content')}")
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            logger.info(f"[ROUTER] Tool calls: {[call['name'] for call in last_message.tool_calls]}")
+    
     if state.get("ready_to_answer"):
+        logger.info("[ROUTER] ready_to_answer=True - ANSWER로 라우팅")
         return "answer"
     
     # 첫 번째 턴인지 확인
     conversation_history = state.get("conversation_history", [])
     is_first_turn = not conversation_history or len(conversation_history) == 0
     
-    if is_first_turn:
-        logger.info("[ROUTER] 첫 번째 턴 - SESSION_SUMMARY로 라우팅")
-        return "session_summary"
+    logger.info(f"[ROUTER] conversation_history: {conversation_history}")
+    logger.info(f"[ROUTER] is_first_turn: {is_first_turn}")
     
-    messages = state.get("messages", [])
-    if not messages:
-        # messages가 없으면 기본 응답 생성
-        return "answer"
+    # messages에서 마지막 메시지의 도구 호출 확인
+    if messages:
+        last_message = messages[-1]
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            tool_name = last_message.tool_calls[0]['name']
+            logger.info(f"[ROUTER] Selected tool: {tool_name}")
+            return tool_name
     
-    last_message = messages[-1]
-    tool_calls = getattr(last_message, 'additional_kwargs', {}).get("tool_calls")
-    
-    if not tool_calls:
-        # tool_calls가 없으면 기본 응답 생성
-        return "answer"
-    
-    tool_name = tool_calls[0]["function"]["name"]
-    logger.info(f"[ROUTER] 선택된 도구: {tool_name}")
-    
-    if tool_name == "chitchat":
-        return "chitchat"
-    elif tool_name == "session_summary":
-        return "session_summary"
-    elif tool_name == "intent_classification":
-        return "intent_classification"
-    elif tool_name == "general_faq":
-        return "general_faq"
-    elif tool_name == "rag_search":
-        return "rag_search"
-    elif tool_name == "product_extraction":
-        return "product_extraction"
-    elif tool_name == "product_search":
-        return "product_search"
-    elif tool_name == "guardrail_check":
-        return "guardrail_check"
-    else:
-        return "answer"
-
-def chitchat_node(state: RAGState, slm: SLM = None) -> RAGState:
-    """일반 대화 처리"""
-    logger.info("💬 [NODE] chitchat_node 실행 시작")
-    query = state.get("query", "")
-    
-    # SLM 인스턴스 생성 (매개변수로 받지 않은 경우에만)
-    if slm is None:
-        slm = SLM()
-    
-    try:
-        response = create_simple_response(slm, query, "chitchat_system")
-        return {
-            **state,
-            "response": response,
-            "ready_to_answer": True
-        }
-    except Exception as e:
-        logger.error(f"Chitchat failed: {e}")
-        return {
-            **state,
-            **create_error_response("chitchat_error")
-        }
+    # 도구 호출이 없으면 기본적으로 RAG_SEARCH로
+    logger.info("[ROUTER] No tool calls found - defaulting to RAG_SEARCH")
+    return "rag_search"
 
 def intent_classification_node(state: RAGState, slm: SLM = None) -> RAGState:
     """의도 분류 노드"""
@@ -265,6 +372,7 @@ def intent_classification_node(state: RAGState, slm: SLM = None) -> RAGState:
             - "햇살론 대출에 대해 알려주세요" → company_products
             - "KB 햇살론 대출 조건과 금리를 알려주세요" → company_products
             - "KB카드 혜택이 뭐예요?" → company_products
+            - "오피스텔을 담보로 대출 신청을 원하는 고객에게 관련 상품 추천해주고, 정확한 신청 자격 알려줘" → company_products
             - "KYC 규정이 뭐예요?" → industry_policies_and_regulations
             - "직원 휴가 정책은 어떻게 되나요?" → company_rules
             - "바젤3 규정에 대해 알려주세요" → industry_policies_and_regulations
@@ -450,9 +558,12 @@ def product_search_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
     """세션 요약 생성 노드 (첫 대화)"""
-    logger.info("📝 [NODE] session_summary_node 실행 시작")
+    import time
+    start_time = time.time()
+    logger.info("[SESSION_SUMMARY] Starting session title generation")
     query = state.get("query", "")
     session_context = state.get("session_context")
+    conversation_history = state.get("conversation_history", [])
     
     # SLM 인스턴스 생성 (매개변수로 받지 않은 경우에만)
     if slm is None:
@@ -465,9 +576,8 @@ def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
         
         if is_first_turn:
             # 공통 함수를 사용하여 제목 생성
-            logger.info(f"Generating session title for query: '{query}'")
             session_title = generate_session_title(query, slm)
-            logger.info(f"Generated session title: '{session_title}'")
+            logger.info(f"[SESSION_SUMMARY] Generated title: '{session_title}'")
 
             # 세션에 제목 저장
             session_manager.update_session(
@@ -482,7 +592,10 @@ def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
             if updated_session_context:
                 session_context = updated_session_context
             
+            end_time = time.time()
+            execution_time = end_time - start_time
             logger.info(f"Returning state with session_title: '{session_title}'")
+            logger.info(f"📝 [NODE] session_summary_node 완료 - 실행시간: {execution_time:.2f}초")
             return {
                 **state,
                 "session_title": session_title,
@@ -491,8 +604,11 @@ def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
                 "response": ""  # RAG 검색에서 실제 응답 생성
             }
         else:
-            # 첫 대화가 아니면 기존 제목 사용
+            # 첫 대화가 아니면 기존 제목 사용하고 RAG 검색으로 넘어감
             existing_title = session_context.session_title if session_context else ""
+            end_time = time.time()
+            execution_time = end_time - start_time
+            logger.info(f"📝 [NODE] session_summary_node 완료 (기존 제목 사용) - 실행시간: {execution_time:.2f}초")
             return {
                 **state,
                 "session_title": existing_title,
@@ -512,7 +628,9 @@ def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGState:
     """RAG 검색 노드"""
-    logger.info("📚 [NODE] rag_search_node 실행 시작")
+    import time
+    start_time = time.time()
+    logger.info("[RAG_SEARCH] Starting document search")
     query = state.get("query", "")
     
     # SLM과 VectorStore 인스턴스 생성 (재사용 가능)
@@ -525,19 +643,14 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
     try:
         # 문서 검색 (성능 최적화를 위해 결과 수 제한)
         retrieved_docs = vector_store.similarity_search(query, k=3)# 더 적은 결과로 속도 향상
-        logger.info(f"RAG search found {len(retrieved_docs)} documents")
-        
-        # PDF 정보 로깅
-        if retrieved_docs:
-            logger.info("📄 [RAG] 사용된 PDF 문서 정보:")
-            for i, doc in enumerate(retrieved_docs):
-                metadata = doc.metadata
-                file_name = metadata.get('file_name', 'Unknown')
-                page_number = metadata.get('page_number', 'Unknown')
-                logger.info(f"  📋 문서 {i+1}: {file_name} (페이지: {page_number})")
+        logger.info(f"[RAG_SEARCH] Found {len(retrieved_docs)} documents")
         
         # 공통 함수를 사용하여 응답 생성
         response, sources = create_rag_response(slm, query, retrieved_docs)
+        
+        end_time = time.time()
+        execution_time = end_time - start_time
+        logger.info(f"📚 [NODE] rag_search_node 완료 - 실행시간: {execution_time:.2f}초")
         
         return {
             **state,
@@ -590,15 +703,40 @@ def guardrail_check_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def answer_node(state: RAGState) -> RAGState:
     """최종 답변 노드"""
-    logger.info("✅ [NODE] answer_node 실행 시작")
-    logger.info(f"State keys: {list(state.keys())}")
+    import time
+    from datetime import datetime
+    start_time = time.time()
+    logger.info("[ANSWER] Preparing final response")
     response = state.get("response", "")
-    logger.info(f"Response from state: '{response}'")
     
     if not response or not response.strip():
-        # 기본 응답 생성
-        response = "안녕하세요! KB금융그룹 상담사입니다. 궁금하신 사항에 대해 도움을 드리겠습니다. 예금, 적금, 대출, 카드 등 다양한 금융 상품에 대한 정보를 제공해드릴 수 있습니다. 더 궁금하신 점이 있으면 언제든지 말씀해 주세요!"
-        logger.info("Generated default response")
+        # 기본 응답 생성 (RAG 검색이 실패한 경우에만)
+        response = "죄송합니다. 해당 질문에 대한 정보를 찾을 수 없습니다. 다른 키워드로 다시 질문해주시거나 관련 부서에 문의해주세요."
+        logger.info("[ANSWER] Using default response")
+    
+    # 마크다운 형식 제거
+    response = clean_markdown_formatting(response)
+    
+    # 대화 턴 저장
+    session_context = state.get("session_context")
+    if session_context:
+        from .session_manager import ConversationTurn
+        turn = ConversationTurn(
+            turn_id=state.get("turn_id", ""),
+            timestamp=datetime.now(),
+            user_query=state.get("query", ""),
+            ai_response=response,
+            category=state.get("intent_category", ""),
+            product_name=state.get("product_name", ""),
+            sources=state.get("sources", []),
+            session_context={}  # 빈 딕셔너리로 초기화
+        )
+        session_manager.add_conversation_turn(session_context.session_id, turn)
+        logger.info(f"✅ [NODE] 대화 턴 저장 완료: {session_context.session_id}")
+    
+    end_time = time.time()
+    execution_time = end_time - start_time
+    logger.info(f"✅ [NODE] answer_node 완료 - 실행시간: {execution_time:.2f}초")
     
     return {
         **state,

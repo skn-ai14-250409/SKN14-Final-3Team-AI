@@ -7,10 +7,10 @@ LangGraph 공통 유틸리티 함수들
 import json
 import os
 import logging
+import yaml
 from typing import List, Dict, Any
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,6 @@ ERROR_MESSAGES = {
     "faq_error": "죄송합니다. 일반적인 은행 FAQ 답변 생성 중 오류가 발생했습니다. 다시 시도해주세요.",
     "product_error": "죄송합니다. 상품 검색 중 오류가 발생했습니다. 다시 시도해주세요.",
     "extraction_error": "죄송합니다. 상품명 추출 중 오류가 발생했습니다.",
-    "chitchat_error": "안녕하세요! KB금융그룹 상담을 도와드리겠습니다."
 }
 
 # ========== 프롬프트 관리 함수들 ==========
@@ -54,7 +53,7 @@ def get_prompt(category: str, **kwargs) -> str:
     Get formatted prompt from YAML template
     
     Args:
-        category: Prompt category (supervisor, chitchat, etc.)
+        category: Prompt category (supervisor, etc.)
         **kwargs: Variables to format into the prompt template
         
     Returns:
@@ -105,51 +104,41 @@ def get_error_message(message_key: str, **kwargs) -> str:
 
 # ========== 기존 프롬프트 템플릿 (호환성 유지) ==========
 SYSTEM_PROMPTS = {
-    "rag_system": """당신은 KB금융그룹의 전문 상담사입니다.
+    "rag_system": """당신은 KB금융그룹의 내부 직원을 위한 전문 상담사입니다.
 
-        다음 문서들을 참고하여 사용자의 질문에 정확하고 도움이 되는 답변을 제공하세요:
+        다음 문서들을 참고하여 직원의 질문에 정확하고 도움이 되는 답변을 제공하세요:
 
         {context_text}
 
         지침:
         1. 문서 내용을 바탕으로 정확한 정보를 제공하세요
         2. 문서에 없는 정보는 추측하지 마세요
-        3. 친근하고 전문적인 톤으로 답변하세요
+        3. 전문적이고 업무 중심의 톤으로 답변하세요
         4. 문서 출처는 언급하지 마세요 (링크나 참조 형태로 표시하지 마세요)
-        5. 답변은 5줄 이내로 간결하게 작성하세요""",
+        5. 답변은 5줄 이내로 간결하게 작성하세요
+        6. 마크다운 형식(*, **, # 등)을 사용하지 마세요
+        7. "추가적인 문의가 필요하시면", "상담해 드리겠습니다" 같은 일반 고객용 문구를 사용하지 마세요
+        8. 직원이 업무에 바로 활용할 수 있는 구체적인 정보를 제공하세요
+        9. 모든 문장을 완전한 형태로 작성하세요 ("~해야함", "~가능" 등으로 끝나지 않고 "-합니다/-입니다/-니다/-해요/-세요/-요" 등으로마무리)
+        10. 조건이나 자격 요건은 명확하고 자연스러운 문장으로 표현하세요""",
             
-    "faq_system": """당신은 KB금융그룹의 전문 상담사입니다.
-        사용자의 일반적인 은행 FAQ 질문에 대해 정확하고 도움이 되는 답변을 제공해주세요.
+    "faq_system": """당신은 KB금융그룹의 내부 직원을 위한 전문 상담사입니다.
+        직원의 일반적인 은행 FAQ 질문에 대해 정확하고 도움이 되는 답변을 제공해주세요.
 
-        사용자 질문: {query}
+        직원 질문: {query}
 
         답변 지침:
         1. 일반적인 은행 업무에 대한 정확한 정보를 제공하세요
         2. 예금, 적금, 대출, 카드 등 기본적인 금융 상품에 대해 설명하세요
-        3. 친근하고 이해하기 쉬운 언어로 답변하세요
+        3. 전문적이고 업무 중심의 언어로 답변하세요
         4. 답변은 3-5줄로 간결하게 작성하세요
+        5. 마크다운 형식(*, **, # 등)을 사용하지 마세요
+        6. "추가적인 문의가 필요하시면", "상담해 드리겠습니다" 같은 일반 고객용 문구를 사용하지 마세요
+        7. 직원이 업무에 바로 활용할 수 있는 구체적인 정보를 제공하세요
+        8. 모든 문장을 완전한 형태로 작성하세요 ("~해야함", "~가능" 등으로 끝나지 않고 "-합니다/-입니다/-니다/-해요/-세요/-요" 등으로 마무리)
+        9. 조건이나 자격 요건은 명확하고 자연스러운 문장으로 표현하세요
 
-        KB금융그룹의 전문 상담사로서 신뢰할 수 있는 정보를 제공해주세요.""",
-        
-    "chitchat_system": """당신은 친근하고 도움이 되는 KB금융그룹 상담사입니다.
-        사용자의 인사, 감사, 일반적인 대화에 자연스럽게 응답해주세요.
-
-        사용자 메시지: {query}
-
-        친근하고 전문적인 톤으로 응답해주세요.""",
-        
-        "guardrail_system": """다음 응답이 KB금융그룹의 가드레일을 준수하는지 검사하세요.
-
-        응답: {response}
-
-        검사 항목:
-        1. 금융 상품 추천이나 투자 조언이 있는가?
-        2. 개인정보나 민감한 정보가 노출되었는가?
-        3. 법적 조언이나 세무 조언이 있는가?
-        4. 부적절한 내용이나 비윤리적인 내용이 있는가?
-
-        준수 여부: [COMPLIANT/VIOLATION]
-        위반 사항: (위반이 있는 경우에만)""",
+        KB금융그룹의 내부 직원을 위한 전문 상담사로서 신뢰할 수 있는 정보를 제공해주세요.""",
         
     "product_extraction_system": """다음 질문에서 KB금융그룹의 상품명을 추출하세요.
 
@@ -178,13 +167,11 @@ SYSTEM_PROMPTS = {
         - company_products: 회사 상품 관련 → product_extraction (상품명 있으면) 또는 rag_search
 
         상황에 맞는 도구를 선택하세요:
-        - chitchat: 인사, 감사, 일반 대화
         - general_faq: 일반적인 은행 FAQ (예금, 적금, 대출 기본 개념 등)
         - rag_search: 문서 검색이 필요한 구체적인 질문
         - product_extraction: 특정 상품명이 언급된 질문에서 상품명 추출
         - product_search: 추출된 상품명으로 상품 정보 검색
         - session_summary: 첫 대화일 때 세션 요약 생성
-        - guardrail_check: 응답이 생성된 후 가드레일 검사 필요 (응답이 있을 때만)
         - answer: 충분한 정보로 최종 답변 준비됨
 
         {response_guidance}
@@ -357,7 +344,7 @@ def create_simple_response(slm_instance, query: str, prompt_type: str) -> str:
     Args:
         slm_instance: SLM 인스턴스
         query: 사용자 쿼리
-        prompt_type: 프롬프트 타입 (faq_system, chitchat_system 등)
+        prompt_type: 프롬프트 타입 (faq_system 등)
         
     Returns:
         str: 생성된 응답
@@ -381,21 +368,124 @@ def create_guardrail_response(slm_instance, response: str) -> tuple[str, List[st
         tuple: (준수 응답, 위반 사항 리스트)
     """
     try:
-        prompt = SYSTEM_PROMPTS["guardrail_system"].format(response=response)
-        guardrail_result = slm_instance.invoke(prompt).strip()
+        # YAML 정책 기반 가드레일 검사
+        guardrail_config = load_guardrail_config()
         
-        if "VIOLATION" in guardrail_result.upper():
-            # 위반이 있는 경우 안전한 응답으로 대체
-            compliant_response = "죄송합니다. 해당 질문에 대해서는 정확한 답변을 드리기 어렵습니다. KB금융그룹 고객센터(1588-9999)로 문의해주시기 바랍니다."
-            violations = ["가드레일 위반 감지"]
-        else:
-            compliant_response = response
-            violations = []
+        # 기본 응답
+        compliant_response = response
+        violations = []
+        
+        # 품질 검사
+        if guardrail_config.get("quality", {}).get("accuracy_check", {}).get("enabled", False):
+            violations.extend(check_accuracy(response, guardrail_config))
+        
+        if guardrail_config.get("quality", {}).get("completeness_check", {}).get("enabled", False):
+            violations.extend(check_completeness(response, guardrail_config))
+        
+        # 용어 정규화
+        if guardrail_config.get("terminology", {}).get("normalization", {}).get("enabled", False):
+            compliant_response = normalize_terminology(compliant_response, guardrail_config)
+        
+        # 구조 검사
+        if guardrail_config.get("structure", {}).get("emphasis", {}).get("enabled", False):
+            compliant_response = apply_emphasis(compliant_response, guardrail_config)
+        
+        # 위반이 있는 경우 안전한 응답으로 대체
+        if violations:
+            compliant_response = "죄송합니다. 해당 질문에 대해서는 정확한 답변을 드리기 어렵습니다. 관련 부서에 문의해주세요."
         
         return compliant_response, violations
         
     except Exception:
         return ERROR_MESSAGES["guardrail_error"], ["가드레일 검사 오류"]
+
+
+def load_guardrail_config() -> Dict[str, Any]:
+    """가드레일 YAML 설정 로드"""
+    try:
+        current_dir = os.path.dirname(__file__)
+        config_path = os.path.join(current_dir, "guardrails", "policy_rules.yaml")
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"Failed to load guardrail config: {e}")
+        return {}
+
+
+def check_accuracy(response: str, config: Dict[str, Any]) -> List[str]:
+    """정확성 검사"""
+    violations = []
+    accuracy_config = config.get("quality", {}).get("accuracy_check", {})
+    
+    if not accuracy_config.get("enabled", False):
+        return violations
+    
+    # 키워드 기반 검사
+    triggers = accuracy_config.get("triggers", {})
+    keywords = triggers.get("keywords", [])
+    
+    for keyword in keywords:
+        if keyword in response:
+            violations.append(f"검증이 필요한 키워드 포함: {keyword}")
+    
+    return violations
+
+
+def check_completeness(response: str, config: Dict[str, Any]) -> List[str]:
+    """완전성 검사"""
+    violations = []
+    completeness_config = config.get("quality", {}).get("completeness_check", {})
+    
+    if not completeness_config.get("enabled", False):
+        return violations
+    
+    # 기본적인 완전성 검사
+    if len(response.strip()) < 50:
+        violations.append("응답이 너무 짧습니다")
+    
+    return violations
+
+
+def normalize_terminology(response: str, config: Dict[str, Any]) -> str:
+    """용어 정규화"""
+    try:
+        current_dir = os.path.dirname(__file__)
+        glossary_path = os.path.join(current_dir, "guardrails", "glossary_terms.yaml")
+        
+        with open(glossary_path, 'r', encoding='utf-8') as f:
+            glossary = yaml.safe_load(f)
+        
+        # 용어 치환
+        terms = glossary.get("terms", [])
+        for term in terms:
+            from_term = term.get("from", "")
+            to_term = term.get("to", "")
+            if from_term and to_term:
+                response = response.replace(from_term, to_term)
+        
+        return response
+    except Exception as e:
+        logger.error(f"Terminology normalization failed: {e}")
+        return response
+
+
+def apply_emphasis(response: str, config: Dict[str, Any]) -> str:
+    """강조 적용"""
+    emphasis_config = config.get("structure", {}).get("emphasis", {})
+    
+    if not emphasis_config.get("enabled", False):
+        return response
+    
+    # 기본적인 강조 적용 (실제로는 더 복잡한 로직 필요)
+    priority_keywords = emphasis_config.get("priority_keywords", {})
+    
+    for keyword, priority in priority_keywords.items():
+        if keyword in response and priority >= 3:
+            # 중요 키워드 강조 (실제 구현에서는 더 정교한 처리 필요)
+            pass
+    
+    return response
 
 
 def extract_product_name(slm_instance, query: str) -> str:
@@ -491,7 +581,7 @@ def create_supervisor_prompt(query: str, is_first_turn: bool, intent_category: s
     response_status = "응답 생성됨" if has_response else "응답 없음"
     product_name = extracted_product if has_product_name else "없음"
     
-    response_guidance = "응답이 이미 생성되었으므로 guardrail_check를 선택하세요." if has_response else ""
+    response_guidance = "응답이 이미 생성되었으므로 answer를 선택하세요." if has_response else ""
     product_guidance = "상품명이 추출되었으므로 반드시 product_search를 선택하세요." if has_product_name and not has_response else ""
     
     try:

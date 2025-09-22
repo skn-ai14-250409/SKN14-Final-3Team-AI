@@ -8,7 +8,6 @@ from .agent import RAGAgent
 from .graph import create_rag_workflow, create_agent, chat_send_message, api_chat
 from .models import RAGState
 from .tools import (
-    chitchat,
     general_faq,
     rag_search,
     product_extraction,
@@ -41,7 +40,6 @@ __all__ = [
     "chat_send_message",
     "api_chat",
     "RAGState",
-    "chitchat",
     "general_faq", 
     "rag_search",
     "product_extraction",
