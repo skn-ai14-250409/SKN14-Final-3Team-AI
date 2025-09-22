@@ -21,8 +21,7 @@ def main():
     
     args = parser.parse_args()
     
-    # 로깅 설정
-    logging.basicConfig(level=logging.INFO)
+    # 로깅 설정 (main.py에서 이미 설정됨)
     logger = logging.getLogger(__name__)
     
     logger.info(f"KB금융 RAG API 서버를 시작합니다...")
