@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 
+from .utils import DEFAULT_MAX_TURNS, DEFAULT_MAX_MESSAGES
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -181,9 +183,8 @@ class SessionManager:
         self._conversations[session_id].append(turn)
         
         # 최대 대화 턴 수 제한 (메모리 관리)
-        max_turns = 50
-        if len(self._conversations[session_id]) > max_turns:
-            self._conversations[session_id] = self._conversations[session_id][-max_turns:]
+        if len(self._conversations[session_id]) > DEFAULT_MAX_TURNS:
+            self._conversations[session_id] = self._conversations[session_id][-DEFAULT_MAX_TURNS:]
         
         logger.info(f"[SESSION] Added turn to session {session_id}: {turn.turn_id}")
         return True
@@ -203,9 +204,8 @@ class SessionManager:
         self._message_histories[session_id].append(message)
         
         # 최대 메시지 수 제한
-        max_messages = 100
-        if len(self._message_histories[session_id]) > max_messages:
-            self._message_histories[session_id] = self._message_histories[session_id][-max_messages:]
+        if len(self._message_histories[session_id]) > DEFAULT_MAX_MESSAGES:
+            self._message_histories[session_id] = self._message_histories[session_id][-DEFAULT_MAX_MESSAGES:]
         
         return True
     

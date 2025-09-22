@@ -47,17 +47,20 @@ class VectorStore:
             self.create_index()
     
     def _get_embedding_model(self):
-        """embedding_backend 설정에 맞는 embedding model 반환"""
+        """embedding_backend 설정에 맞는 embedding model 반환 (성능 최적화)"""
         if self.embedding_backend == "openai":
             return OpenAIEmbeddings(
                 model=EMBEDDING_MODEL_NAME,
-                api_key=MODEL_KEY
+                api_key=MODEL_KEY,
+                chunk_size=1000,  # 배치 크기 최적화
+                max_retries=1,    # 재시도 횟수 더 제한 (2 → 1)
+                request_timeout=5  # 타임아웃 더 짧게 (10 → 5)
             )
         elif self.embedding_backend == "huggingface":
             return HuggingFaceEmbeddings(
                 model_name=EMBEDDING_MODEL_NAME,
                 model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True}
+                encode_kwargs={"normalize_embeddings": True, "batch_size": 32}  # 배치 크기 최적화
             )
         else:
             raise ValueError(f"Unknown embedding backend: {self.embedding_backend}")
