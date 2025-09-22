@@ -126,13 +126,13 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
     # 첫 번째 턴일 때: session_summary 제외한 도구들 사용 (이미 SESSION_SUMMARY 노드에서 처리됨)
     if is_first_turn:
         logger.info("[SUPERVISOR] First turn: Using tools (excluding session_summary)")
-        from .tools import general_faq, rag_search, product_extraction, product_search, guardrail_check, answer, intent_classification
-        tool_functions = [general_faq, rag_search, product_extraction, product_search, guardrail_check, answer, intent_classification]
+        from .tools import general_faq, rag_search, product_extraction, product_search, answer
+        tool_functions = [general_faq, rag_search, product_extraction, product_search, answer]
     else:
         # 두 번째 턴 이후: session_summary, intent_classification 제외한 도구들만 사용
         logger.info("[SUPERVISOR] Multi-turn: Using limited tools")
-        from .tools import general_faq, rag_search, product_extraction, product_search, guardrail_check, answer
-        tool_functions = [general_faq, rag_search, product_extraction, product_search, guardrail_check, answer]
+        from .tools import general_faq, rag_search, product_extraction, product_search, answer
+        tool_functions = [general_faq, rag_search, product_extraction, product_search, answer]
     
     logger.info(f"Available tools: {[tool.name for tool in tool_functions]}")
 
@@ -256,22 +256,6 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
                     "sources": sources,
                     "retrieved_docs": retrieved_docs,
                     "context_text": format_context(retrieved_docs) if retrieved_docs else "",
-                    "ready_to_answer": True,
-                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
-                    "intent_category": intent_category,
-                }
-            elif tool_name == "guardrail_check":
-                # 가드레일 검사 실행
-                current_response = state.get("response", "")
-                compliant_response, violations = create_guardrail_response(slm, current_response)
-                compliant_response = clean_markdown_formatting(compliant_response)
-                return {
-                    **state,
-                    "messages": [result],
-                    "guardrail_decision": "COMPLIANT" if not violations else "VIOLATION",
-                    "violations": violations,
-                    "compliant_response": compliant_response,
-                    "response": compliant_response,
                     "ready_to_answer": True,
                     "n_tool_calling": state.get("n_tool_calling", 0) + 1,
                     "intent_category": intent_category,

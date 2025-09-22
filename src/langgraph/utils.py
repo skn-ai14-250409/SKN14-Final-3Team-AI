@@ -7,10 +7,10 @@ LangGraph 공통 유틸리티 함수들
 import json
 import os
 import logging
+import yaml
 from typing import List, Dict, Any
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,6 @@ SYSTEM_PROMPTS = {
         - product_extraction: 특정 상품명이 언급된 질문에서 상품명 추출
         - product_search: 추출된 상품명으로 상품 정보 검색
         - session_summary: 첫 대화일 때 세션 요약 생성
-        - guardrail_check: 응답이 생성된 후 가드레일 검사 필요 (응답이 있을 때만)
         - answer: 충분한 정보로 최종 답변 준비됨
 
         {response_guidance}
@@ -369,21 +368,124 @@ def create_guardrail_response(slm_instance, response: str) -> tuple[str, List[st
         tuple: (준수 응답, 위반 사항 리스트)
     """
     try:
-        prompt = SYSTEM_PROMPTS["guardrail_system"].format(response=response)
-        guardrail_result = slm_instance.invoke(prompt).strip()
+        # YAML 정책 기반 가드레일 검사
+        guardrail_config = load_guardrail_config()
         
-        if "VIOLATION" in guardrail_result.upper():
-            # 위반이 있는 경우 안전한 응답으로 대체
-            compliant_response = "죄송합니다. 해당 질문에 대해서는 정확한 답변을 드리기 어렵습니다. KB금융그룹 고객센터(1588-9999)로 문의해주시기 바랍니다."
-            violations = ["가드레일 위반 감지"]
-        else:
-            compliant_response = response
-            violations = []
+        # 기본 응답
+        compliant_response = response
+        violations = []
+        
+        # 품질 검사
+        if guardrail_config.get("quality", {}).get("accuracy_check", {}).get("enabled", False):
+            violations.extend(check_accuracy(response, guardrail_config))
+        
+        if guardrail_config.get("quality", {}).get("completeness_check", {}).get("enabled", False):
+            violations.extend(check_completeness(response, guardrail_config))
+        
+        # 용어 정규화
+        if guardrail_config.get("terminology", {}).get("normalization", {}).get("enabled", False):
+            compliant_response = normalize_terminology(compliant_response, guardrail_config)
+        
+        # 구조 검사
+        if guardrail_config.get("structure", {}).get("emphasis", {}).get("enabled", False):
+            compliant_response = apply_emphasis(compliant_response, guardrail_config)
+        
+        # 위반이 있는 경우 안전한 응답으로 대체
+        if violations:
+            compliant_response = "죄송합니다. 해당 질문에 대해서는 정확한 답변을 드리기 어렵습니다. 관련 부서에 문의해주세요."
         
         return compliant_response, violations
         
     except Exception:
         return ERROR_MESSAGES["guardrail_error"], ["가드레일 검사 오류"]
+
+
+def load_guardrail_config() -> Dict[str, Any]:
+    """가드레일 YAML 설정 로드"""
+    try:
+        current_dir = os.path.dirname(__file__)
+        config_path = os.path.join(current_dir, "guardrails", "policy_rules.yaml")
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"Failed to load guardrail config: {e}")
+        return {}
+
+
+def check_accuracy(response: str, config: Dict[str, Any]) -> List[str]:
+    """정확성 검사"""
+    violations = []
+    accuracy_config = config.get("quality", {}).get("accuracy_check", {})
+    
+    if not accuracy_config.get("enabled", False):
+        return violations
+    
+    # 키워드 기반 검사
+    triggers = accuracy_config.get("triggers", {})
+    keywords = triggers.get("keywords", [])
+    
+    for keyword in keywords:
+        if keyword in response:
+            violations.append(f"검증이 필요한 키워드 포함: {keyword}")
+    
+    return violations
+
+
+def check_completeness(response: str, config: Dict[str, Any]) -> List[str]:
+    """완전성 검사"""
+    violations = []
+    completeness_config = config.get("quality", {}).get("completeness_check", {})
+    
+    if not completeness_config.get("enabled", False):
+        return violations
+    
+    # 기본적인 완전성 검사
+    if len(response.strip()) < 50:
+        violations.append("응답이 너무 짧습니다")
+    
+    return violations
+
+
+def normalize_terminology(response: str, config: Dict[str, Any]) -> str:
+    """용어 정규화"""
+    try:
+        current_dir = os.path.dirname(__file__)
+        glossary_path = os.path.join(current_dir, "guardrails", "glossary_terms.yaml")
+        
+        with open(glossary_path, 'r', encoding='utf-8') as f:
+            glossary = yaml.safe_load(f)
+        
+        # 용어 치환
+        terms = glossary.get("terms", [])
+        for term in terms:
+            from_term = term.get("from", "")
+            to_term = term.get("to", "")
+            if from_term and to_term:
+                response = response.replace(from_term, to_term)
+        
+        return response
+    except Exception as e:
+        logger.error(f"Terminology normalization failed: {e}")
+        return response
+
+
+def apply_emphasis(response: str, config: Dict[str, Any]) -> str:
+    """강조 적용"""
+    emphasis_config = config.get("structure", {}).get("emphasis", {})
+    
+    if not emphasis_config.get("enabled", False):
+        return response
+    
+    # 기본적인 강조 적용 (실제로는 더 복잡한 로직 필요)
+    priority_keywords = emphasis_config.get("priority_keywords", {})
+    
+    for keyword, priority in priority_keywords.items():
+        if keyword in response and priority >= 3:
+            # 중요 키워드 강조 (실제 구현에서는 더 정교한 처리 필요)
+            pass
+    
+    return response
 
 
 def extract_product_name(slm_instance, query: str) -> str:
@@ -479,7 +581,7 @@ def create_supervisor_prompt(query: str, is_first_turn: bool, intent_category: s
     response_status = "응답 생성됨" if has_response else "응답 없음"
     product_name = extracted_product if has_product_name else "없음"
     
-    response_guidance = "응답이 이미 생성되었으므로 guardrail_check를 선택하세요." if has_response else ""
+    response_guidance = "응답이 이미 생성되었으므로 answer를 선택하세요." if has_response else ""
     product_guidance = "상품명이 추출되었으므로 반드시 product_search를 선택하세요." if has_product_name and not has_response else ""
     
     try:
