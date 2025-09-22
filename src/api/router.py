@@ -7,7 +7,7 @@ from pathlib import Path
 import os
 
 from src.orchestrator import Orchestrator
-from src.langgraph.langgraph_v1 import get_langgraph_workflow
+from src.langgraph.langgraph_v2 import get_langgraph_workflow
 from src.rag.vector_store import VectorStore
 from src.config import VECTOR_STORE_INDEX_NAME, DATA_FOLDER_PATH
 from src.constants import STATUS_SUCCESS, STATUS_FAIL
@@ -168,78 +168,95 @@ async def healthcheck():
     return BaseResponse(status=STATUS_SUCCESS)
 
 # RAG 질의
-@router.post("/query_rag", response_model=QueryRagResponse)
-async def query_rag(input: QueryRagInput):
-    try:
-        orchestrator = Orchestrator()
-        result = orchestrator.query_rag(input.prompt)
+# @router.post("/query_rag", response_model=QueryRagResponse)
+# async def query_rag(input: QueryRagInput):
+#     try:
+#         orchestrator = Orchestrator()
+#         result = orchestrator.query_rag(input.prompt)
 
-        return QueryRagResponse(
-            status=STATUS_SUCCESS,
-            response=result["response"],
-            sources=result.get("sources", [])  # 여기서 orchestrator가 반환하는 Document.metadata 리스트
-        )
-    except Exception as e:
-        logger.error(f"query_rag failed: {e}")
-        return QueryRagResponse(
-            status=STATUS_FAIL,
-            response=f"질의 처리 중 오류가 발생했습니다: {str(e)}",
-            sources=[]
-        )
+#         return QueryRagResponse(
+#             status=STATUS_SUCCESS,
+#             response=result["response"],
+#             sources=result.get("sources", [])  # 여기서 orchestrator가 반환하는 Document.metadata 리스트
+#         )
+#     except Exception as e:
+#         logger.error(f"query_rag failed: {e}")
+#         return QueryRagResponse(
+#             status=STATUS_FAIL,
+#             response=f"질의 처리 중 오류가 발생했습니다: {str(e)}",
+#             sources=[]
+#         )
 
-# LLM 전용 답변 생성
-@router.post("/answer_with_llm_only")
-async def answer_with_llm_only(input: LLMOnlyInput):
-    """LLM만 사용하는 간단한 답변 (RAG 없이)"""
-    try:
-        orchestrator = Orchestrator()
-        response = orchestrator.answer_with_llm_only(input.prompt)
-        return LLMOnlyResponse(
-            status=STATUS_SUCCESS,
-            response=response
-        )
-    except Exception as e:
-        logger.error(f"answer_with_llm_only failed: {e}")
-        return LLMOnlyResponse(
-            status=STATUS_FAIL,
-            response=f"LLM 답변 생성 중 오류가 발생했습니다: {str(e)}"
-        )
+# # LLM 전용 답변 생성
+# @router.post("/answer_with_llm_only")
+# async def answer_with_llm_only(input: LLMOnlyInput):
+#     """LLM만 사용하는 간단한 답변 (RAG 없이)"""
+#     try:
+#         orchestrator = Orchestrator()
+#         response = orchestrator.answer_with_llm_only(input.prompt)
+#         return LLMOnlyResponse(
+#             status=STATUS_SUCCESS,
+#             response=response
+#         )
+#     except Exception as e:
+#         logger.error(f"answer_with_llm_only failed: {e}")
+#         return LLMOnlyResponse(
+#             status=STATUS_FAIL,
+#             response=f"LLM 답변 생성 중 오류가 발생했습니다: {str(e)}"
+#         )
+
 
 @router.post("/langgraph/langgraph_rag", response_model=LangGraphRAGResponse)
-async def experimental_langgraph_rag(input: LangGraphRAGInput):
+async def langgraph_rag(input: LangGraphRAGInput):
     """
-    개선된 LangGraph RAG 엔드포인트
+    LangGraph RAG 엔드포인트 (v2) - 툴콜링 기반
     
+    - 툴콜링 기반 워크플로우
+    - 중앙 관리자(Supervisor) 패턴
+    - 다양한 도구 활용 (chitchat, general_faq, rag_search, product_extraction 등)
+    - 가드레일 검사
     - 세션 관리 지원
-    - 강화된 에러 처리
-    - 성능 최적화된 파일명 매칭
-    - 구조화된 로깅
-    - 세션 정보 반환
     """
-    logger.info(f"[LANGGRAPH] RAG query: {input.prompt[:100]}... (session_id: {input.session_id})")
+    logger.info(f"[LANGGRAPH RAG] RAG query: {input.prompt[:100]}... (session_id: {input.session_id})")
     
     try:
         workflow = get_langgraph_workflow()
         result = workflow.run_workflow(input.prompt, input.session_id)
         
-        return LangGraphRAGResponse(
-                    status=STATUS_SUCCESS,
-                    response=result["response"],
-                    sources=result["sources"],
-                    category=result["category"],
-                    product_name=result.get("product_name", ""),
-                    session_info=result.get("session_info", {}),
-                    initial_intent=result.get("initial_intent", ""),
-                    initial_topic_summary=result.get("initial_topic_summary", ""),
-                    conversation_mode=result.get("session_info", {}).get("conversation_mode", "normal"),
-                    current_topic=result.get("session_info", {}).get("current_topic", ""),
-                    active_product=result.get("session_info", {}).get("active_product", "")
-                )
+        # 세션 제목 로깅
+        session_title = result.get("initial_topic_summary", "")
+        logger.info(f"[LANGGRAPH RAG] Session title: '{session_title}'")
+        
+        # 세션 정보에 session_title 추가
+        session_info = result.get("session_info", {})
+        if result.get("initial_topic_summary"):
+            session_info["session_title"] = result.get("initial_topic_summary")
+        
+        response_data = LangGraphRAGResponse(
+            status=STATUS_SUCCESS,
+            response=result["response"],
+            sources=result.get("sources", []),
+            category=result.get("category", ""),
+            product_name=result.get("product_name", ""),
+            session_info=session_info,
+            initial_intent=result.get("initial_intent", ""),
+            initial_topic_summary=result.get("initial_topic_summary", ""),
+            conversation_mode=result.get("conversation_mode", "tool_calling"),
+            current_topic=result.get("current_topic", ""),
+            active_product=result.get("active_product", "")
+        )
+        
+        # UTF-8 인코딩으로 JSON 응답 반환
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content=response_data.dict(),
+            media_type="application/json; charset=utf-8"
+        )
     except Exception as e:
-        logger.error(f"[LANGGRAPH] RAG failed: {e}")
-        return LangGraphRAGResponse(
+        logger.error(f"[LANGGRAPH RAG] RAG failed: {e}")
+        error_response = LangGraphRAGResponse(
             status=STATUS_FAIL,
-            response=f"LangGraph RAG 처리 중 오류가 발생했습니다: {str(e)}",
+            response=f"LangGraph V2 RAG 처리 중 오류가 발생했습니다: {str(e)}",
             sources=[],
             category="error",
             product_name="",
@@ -249,6 +266,13 @@ async def experimental_langgraph_rag(input: LangGraphRAGInput):
             conversation_mode="error",
             current_topic="",
             active_product=""
+        )
+        
+        # UTF-8 인코딩으로 JSON 응답 반환
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content=error_response.dict(),
+            media_type="application/json; charset=utf-8"
         )
 
 # LangGraph 세션 관리 엔드포인트
@@ -282,45 +306,6 @@ async def get_session_info(session_id: str):
             "status": STATUS_FAIL,
             "message": f"세션 정보 조회 중 오류가 발생했습니다: {str(e)}"
         }
-
-# 멀티턴 대화 전용 엔드포인트
-@router.post("/langgraph/multiturn", response_model=LangGraphRAGResponse)
-async def multiturn_conversation(input: LangGraphRAGInput):
-    """멀티턴 대화 전용 엔드포인트"""
-    logger.info(f"[MULTITURN] Conversation query: {input.prompt[:100]}... (session_id: {input.session_id})")
-    
-    try:
-        workflow = get_langgraph_workflow()
-        result = workflow.run_workflow(input.prompt, input.session_id)
-        
-        return LangGraphRAGResponse(
-            status=STATUS_SUCCESS,
-            response=result["response"],
-            sources=result["sources"],
-            category=result["category"],
-            product_name=result.get("product_name", ""),
-            session_info=result.get("session_info", {}),
-            initial_intent=result.get("initial_intent", ""),
-            initial_topic_summary=result.get("initial_topic_summary", ""),
-            conversation_mode=result.get("session_info", {}).get("conversation_mode", "normal"),
-            current_topic=result.get("session_info", {}).get("current_topic", ""),
-            active_product=result.get("session_info", {}).get("active_product", "")
-        )
-    except Exception as e:
-        logger.error(f"[MULTITURN] Conversation failed: {e}")
-        return LangGraphRAGResponse(
-            status=STATUS_FAIL,
-            response=f"멀티턴 대화 처리 중 오류가 발생했습니다: {str(e)}",
-            sources=[],
-            category="error",
-            product_name="",
-            session_info={},
-            initial_intent="",
-            initial_topic_summary="",
-            conversation_mode="error",
-            current_topic="",
-            active_product=""
-        )
 
 # 세션 정리 엔드포인트
 @router.delete("/langgraph/session/{session_id}")
@@ -366,72 +351,87 @@ async def get_session_stats():
             "message": f"세션 통계 조회 중 오류가 발생했습니다: {str(e)}"
         }
 
+
 # LangGraph 워크플로우 상태 조회
 @router.get("/langgraph/workflow/status")
 async def get_workflow_status():
-    """LangGraph 워크플로우 상태 조회"""
+    """LangGraph V2 워크플로우 상태 조회 (툴콜링 기반)"""
     try:
         workflow = get_langgraph_workflow()
         return {
             "status": STATUS_SUCCESS,
-            "workflow_type": "LangGraph RAG Workflow",
+            "workflow_type": "LangGraph RAG Workflow v2 (Tool Calling)",
             "features": [
-                "세션 관리",
-                "강화된 에러 처리", 
-                "성능 최적화된 파일명 매칭",
-                "구조화된 로깅",
-                "카테고리별 처리",
-                "상품명 추출"
+                "툴콜링 기반 워크플로우",
+                "중앙 관리자(Supervisor) 패턴",
+                "다양한 도구 활용",
+                "가드레일 검사",
+                "세션 관리 지원",
+                "상품명 추출 및 검색",
+                "일반 FAQ 처리"
+            ],
+            "tools": [
+                "chitchat",
+                "general_faq", 
+                "rag_search",
+                "product_extraction",
+                "product_search",
+                "session_summary",
+                "guardrail_check",
+                "answer"
             ],
             "nodes": [
-                "first_turn_preprocess",
-                "classify_intent", 
-                "handle_general_faq",
-                "extract_product_name",
-                "search_documents",
-                "filter_relevance",
-                "generate_response"
+                "session_init",
+                "supervisor",
+                "chitchat",
+                "general_faq",
+                "product_extraction",
+                "product_search",
+                "session_summary",
+                "rag_search",
+                "guardrail_check",
+                "answer"
             ]
         }
     except Exception as e:
-        logger.error(f"Workflow status check failed: {e}")
+        logger.error(f"Workflow V2 status check failed: {e}")
         return {
             "status": STATUS_FAIL,
-            "message": f"워크플로우 상태 조회 중 오류가 발생했습니다: {str(e)}"
+            "message": f"워크플로우 V2 상태 조회 중 오류가 발생했습니다: {str(e)}"
         }
 
-# Intent 라우팅 기반 처리
-@router.post("/process_with_intent_routing")
-async def process_with_intent_routing(input: IntentRoutingInput):
-    """Intent 분류 후 적절한 처리 방식으로 답변 생성"""
-    try:
-        orchestrator = Orchestrator()
-        result = orchestrator.process_with_intent_routing(input.prompt)
+# # Intent 라우팅 기반 처리
+# @router.post("/process_with_intent_routing")
+# async def process_with_intent_routing(input: IntentRoutingInput):
+#     """Intent 분류 후 적절한 처리 방식으로 답변 생성"""
+#     try:
+#         orchestrator = Orchestrator()
+#         result = orchestrator.process_with_intent_routing(input.prompt)
         
-        # result가 딕셔너리인 경우 (새로운 형식)
-        if isinstance(result, dict):
-            return IntentRoutingResponse(
-                status=STATUS_SUCCESS,
-                response=result.get("response", ""),
-                sources=result.get("sources", []),
-                category=result.get("category", "")
-            )
-        # result가 문자열인 경우 (기존 형식)
-        else:
-            return IntentRoutingResponse(
-                status=STATUS_SUCCESS,
-                response=result,
-                sources=[],
-                category=""
-            )
-    except Exception as e:
-        logger.error(f"process_with_intent_routing failed: {e}")
-        return IntentRoutingResponse(
-            status=STATUS_FAIL,
-            response=f"Intent 라우팅 처리 중 오류가 발생했습니다: {str(e)}",
-            sources=[],
-            category=""
-        )
+#         # result가 딕셔너리인 경우 (새로운 형식)
+#         if isinstance(result, dict):
+#             return IntentRoutingResponse(
+#                 status=STATUS_SUCCESS,
+#                 response=result.get("response", ""),
+#                 sources=result.get("sources", []),
+#                 category=result.get("category", "")
+#             )
+#         # result가 문자열인 경우 (기존 형식)
+#         else:
+#             return IntentRoutingResponse(
+#                 status=STATUS_SUCCESS,
+#                 response=result,
+#                 sources=[],
+#                 category=""
+#             )
+#     except Exception as e:
+#         logger.error(f"process_with_intent_routing failed: {e}")
+#         return IntentRoutingResponse(
+#             status=STATUS_FAIL,
+#             response=f"Intent 라우팅 처리 중 오류가 발생했습니다: {str(e)}",
+#             sources=[],
+#             category=""
+#         )
 
 
 # 모든 벡터 삭제

@@ -16,7 +16,8 @@ BASE_URL = "http://localhost:8000/api/v1"
 USE_INTENT_ROUTING = True  # True: process_with_intent_routing, False: query_rag
 ENDPOINT_OPTIONS = {
     "intent": "/process_with_intent_routing",
-    "rag": "/query_rag"
+    "rag": "/query_rag",
+    "langgraph": "/langgraph/langgraph_rag"
 }
 
 # 테스트 설정
@@ -49,7 +50,7 @@ from evaluation.openai_evaluator import OpenAIAnswerEvaluator
 from evaluation.result_saver import TestResultSaver
 
 # 동적 엔드포인트 설정
-ENDPOINT = "/process_with_intent_routing" if USE_INTENT_ROUTING else "/query_rag"
+ENDPOINT = "/langgraph" if USE_INTENT_ROUTING else "/query_rag"
 
 class RAGMetrics:
     """RAG 평가 지표 계산 클래스"""
@@ -910,16 +911,31 @@ class ComprehensiveRAGEvaluator:
 
 def main():
     """메인 실행 함수"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="RAG 시스템 성능 평가 도구")
+    parser.add_argument("--quick-test", action="store_true", help="빠른 테스트 실행 (langgraph 엔드포인트)")
+    parser.add_argument("--endpoint", choices=["intent", "rag", "langgraph"], default="langgraph", help="사용할 엔드포인트")
+    args = parser.parse_args()
+    
     print("RAG 시스템 성능 평가 도구")
     print("=" * 50)
+    
+    # --quick-test 옵션이 있으면 빠른 테스트 실행
+    if args.quick_test:
+        print(f"빠른 테스트 실행 (엔드포인트: {args.endpoint})")
+        tester = QuickTester(args.endpoint)
+        tester.run_quick_test()
+        return
     
     # 엔드포인트 선택
     print("테스트할 엔드포인트를 선택하세요:")
     print("1. process_with_intent_routing (Intent 라우팅)")
     print("2. query_rag (기본 RAG)")
+    print("3. langgraph/langgraph_rag (LangGraph V2)")
     print("=" * 50)
     
-    endpoint_choice = input("엔드포인트 선택 (1-2): ").strip()
+    endpoint_choice = input("엔드포인트 선택 (1-3): ").strip()
     
     if endpoint_choice == "1":
         endpoint_type = "intent"
@@ -927,6 +943,9 @@ def main():
     elif endpoint_choice == "2":
         endpoint_type = "rag"
         endpoint_name = "query_rag"
+    elif endpoint_choice == "3":
+        endpoint_type = "langgraph"
+        endpoint_name = "langgraph/langgraph_rag"
     else:
         print("잘못된 선택입니다. 기본값(Intent 라우팅)을 사용합니다.")
         endpoint_type = "intent"

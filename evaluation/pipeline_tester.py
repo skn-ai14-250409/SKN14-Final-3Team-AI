@@ -27,7 +27,7 @@ class PipelineTester:
         self.endpoint_map = {
             "intent": "/process_with_intent_routing",
             "rag": "/query_rag",
-            "langgraph": "/experimental/langgraph_rag"
+            "langgraph": "/langgraph/langgraph_rag"
         }
         # OpenAI 평가기 (지연 초기화)
         self.use_openai_eval = False
@@ -272,13 +272,13 @@ class PipelineTester:
     
     def test_langgraph_rag(self, prompt: str) -> Dict[str, Any]:
         """LangGraph RAG 테스트"""
-        print(f"\nLangGraph RAG 테스트 (실험용)")
+        print(f"\nLangGraph RAG 테스트")
         print(f"질문: {prompt}")
 
         start_time = time.time()
         try:
             response = requests.post(
-                f"{self.base_url}/experimental/langgraph_rag",
+                f"{self.base_url}/langgraph/langgraph_rag",
                 json={"prompt": prompt},
                 timeout=300
             )
@@ -411,14 +411,52 @@ class PipelineTester:
 
 def main():
     """메인 실행 함수 - 대화형 메뉴"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="RAG 시스템 파이프라인 테스트 도구")
+    parser.add_argument("--quick-test", action="store_true", help="빠른 테스트 실행 (langgraph 엔드포인트)")
+    parser.add_argument("--endpoint", choices=["intent", "rag", "langgraph"], default="langgraph", help="사용할 엔드포인트")
+    args = parser.parse_args()
+    
     print("RAG 시스템 파이프라인 테스트 도구")
     print("=" * 50)
+    
+    # --quick-test 옵션이 있으면 빠른 테스트 실행
+    if args.quick_test:
+        print(f"빠른 테스트 실행 (엔드포인트: {args.endpoint})")
+        tester = PipelineTester(args.endpoint)
+        
+        # 간단한 테스트 케이스들
+        test_cases = [
+            "KB 4대연금 신용대출에 대해 알려주세요",
+            "대출 금리는 어떻게 되나요?",
+            "신용대출 조건이 뭔가요?"
+        ]
+        
+        for i, query in enumerate(test_cases, 1):
+            print(f"\n테스트 {i}/{len(test_cases)}: {query}")
+            print("-" * 30)
+            
+            if args.endpoint == "langgraph":
+                result = tester.test_langgraph_rag(query)
+            elif args.endpoint == "intent":
+                result = tester.test_intent_routing(query)
+            elif args.endpoint == "rag":
+                result = tester.test_basic_rag(query)
+            
+            tester.results.append({
+                "question": query,
+                "result": result
+            })
+        
+        tester.print_summary()
+        return
     
     # 엔드포인트 선택
     print("테스트할 엔드포인트를 선택하세요:")
     print("1. process_with_intent_routing (Intent 라우팅)")
     print("2. query_rag (기본 RAG)")
-    print("3. experimental/langgraph_rag (LangGraph 실험용)")
+    print("3. langgraph/langgraph_rag (LangGraph V2)")
     print("=" * 50)
     
     endpoint_choice = input("엔드포인트 선택 (1-3): ").strip()
@@ -431,7 +469,7 @@ def main():
         endpoint_name = "query_rag"
     elif endpoint_choice == "3":
         endpoint_type = "langgraph"
-        endpoint_name = "experimental/langgraph_rag"
+        endpoint_name = "langgraph/langgraph_rag"
     else:
         print("잘못된 선택입니다. 기본값(Intent 라우팅)을 사용합니다.")
         endpoint_type = "intent"
@@ -606,8 +644,6 @@ def main():
         else:
             print(f"오류: {result['error']}")
         
-        time.sleep(1)  # 서버 부하 방지
-    
     # 최종 결과 요약
     print("\n" + "=" * 60)
     print("테스트 완료!")

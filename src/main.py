@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import logging
 
 from src.api.router import router
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="KB금융 RAG API",
     description="KB금융 문서 검색 및 질의응답 시스템",
-    version="1.0.0"
+    version="1.0.0",
+    default_response_class=JSONResponse
 )
 
 # CORS 설정
