@@ -21,4 +21,4 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY . .
 
 # 💡 FastAPI는 uvicorn으로 실행! 0.0.0.0으로 열어야 외부에서 접속 가능
-CMD ["uvicorn", "run_server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "run_server.py", "--host", "0.0.0.0", "--port", "8000"]
