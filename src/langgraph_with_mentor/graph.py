@@ -20,7 +20,6 @@ from langgraph.graph import START, END, StateGraph
 from .models import RAGState
 from .nodes import (
     session_init_node,
-    intent_classification_node,
     supervisor_node,
     supervisor_router,
     product_extraction_node,
@@ -38,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 # Main workflow nodes
 SESSION_INIT = "session_init"
-INTENT_CLASSIFICATION = "intent_classification"
 SUPERVISOR = "supervisor"
 PRODUCT_EXTRACTION = "product_extraction"
 PRODUCT_SEARCH = "product_search"
@@ -75,7 +73,7 @@ def create_rag_workflow(
 ) -> Runnable:
     """
     Create RAG workflow following the specified scenario:
-    SESSION_INIT -> INTENT_CLASSIFICATION -> SUPERVISOR -> SPECIALIZED_NODES -> ANSWER
+    SESSION_INIT -> SESSION_SUMMARY -> SUPERVISOR -> SPECIALIZED_NODES -> ANSWER
     
     Args:
         checkpointer: Checkpoint saver for conversation persistence
@@ -97,19 +95,7 @@ def create_rag_workflow(
     workflow.add_node(SESSION_INIT, session_init_node)
     workflow.add_edge(START, SESSION_INIT)
     
-    # Intent classification
-    intent_classification_with_slm = partial(intent_classification_node, slm=slm)
-    workflow.add_node(INTENT_CLASSIFICATION, intent_classification_with_slm)
-    workflow.add_edge(SESSION_INIT, INTENT_CLASSIFICATION)
-    
-    # Conditional routing after intent classification
-    # First turn: INTENT_CLASSIFICATION -> SESSION_SUMMARY
-    # Subsequent turns: INTENT_CLASSIFICATION -> SUPERVISOR
-    workflow.add_conditional_edges(
-        INTENT_CLASSIFICATION,
-        lambda state: "session_summary" if not state.get("conversation_history", []) else "supervisor",
-        ["session_summary", "supervisor"]
-    )
+    workflow.add_edge(SESSION_INIT, SESSION_SUMMARY)
     
     # Supervisor node - LLM-based routing with tool calling
     supervisor_with_llm = partial(supervisor_node, llm=llm, slm=slm)
@@ -138,7 +124,8 @@ def create_rag_workflow(
     
     # SESSION_SUMMARY 후 SUPERVISOR로 라우팅
     workflow.add_edge(SESSION_SUMMARY, SUPERVISOR)
-    
+    workflow.add_edge(SUPERVISOR, ANSWER)
+
     # RAG search node (VectorStore 인스턴스 재사용)
     from ..rag.vector_store import VectorStore
     vector_store = VectorStore()
