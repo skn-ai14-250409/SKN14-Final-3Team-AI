@@ -16,12 +16,6 @@ from pydantic import BaseModel, Field
 
 # ========== Enum Definitions ==========
 
-class IntentCategory(str, Enum):
-    """의도 분류 카테고리"""
-    GENERAL_BANKING_FAQS = "general_banking_FAQs"
-    INDUSTRY_POLICIES = "industry_policies_and_regulations"
-    COMPANY_RULES = "company_rules"
-    COMPANY_PRODUCTS = "company_products"
 
 
 class ConversationMode(str, Enum):
@@ -83,6 +77,20 @@ class SessionContext(BaseModel):
     conversation_turns: int = Field(default=0, description="대화 턴 수")
     session_title: str = Field(default="", description="세션 제목")
     is_first_turn: bool = Field(default=True, description="첫 대화 여부")
+    
+    # session_manager.py와의 호환성을 위한 추가 필드들
+    last_activity: str = Field(default="", description="마지막 활동 시간")
+    initial_intent: str = Field(default="", description="초기 의도")
+    current_topic: str = Field(default="", description="현재 주제")
+    conversation_summary: str = Field(default="", description="대화 요약")
+    user_preferences: Dict[str, Any] = Field(default_factory=dict, description="사용자 선호도")
+    active_product: Optional[str] = Field(default=None, description="활성 상품")
+    conversation_mode: str = Field(default="normal", description="대화 모드")
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SessionContext':
+        """딕셔너리에서 객체 생성"""
+        return cls(**data)
 
 
 class ConversationTurn(BaseModel):
@@ -90,7 +98,6 @@ class ConversationTurn(BaseModel):
     turn_id: str = Field(description="턴 고유 식별자")
     query: str = Field(description="사용자 질문")
     response: str = Field(description="AI 응답")
-    intent_category: IntentCategory = Field(description="의도 분류")
     product_name: str = Field(default="", description="추출된 상품명")
     sources: List[Dict[str, Any]] = Field(default_factory=list, description="참조 문서")
     timestamp: str = Field(description="생성 시간")
@@ -106,12 +113,6 @@ class DocumentSource(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
 
 
-class IntentClassificationResult(BaseModel):
-    """의도 분류 결과"""
-    category: IntentCategory = Field(description="분류된 의도")
-    confidence: float = Field(ge=0.0, le=1.0, description="신뢰도")
-    reasoning: str = Field(description="분류 근거")
-    keywords: List[str] = Field(default_factory=list, description="키워드")
 
 
 class ProductExtractionResult(BaseModel):
@@ -144,7 +145,6 @@ class WorkflowExecutionResult(BaseModel):
     """워크플로우 실행 결과"""
     success: bool = Field(description="실행 성공 여부")
     response: str = Field(description="최종 응답")
-    intent_category: IntentCategory = Field(description="의도 분류")
     product_name: str = Field(default="", description="상품명")
     sources: List[DocumentSource] = Field(default_factory=list, description="참조 문서")
     session_info: SessionContext = Field(description="세션 정보")
@@ -166,9 +166,6 @@ class RAGState(TypedDict):
     conversation_history: List[ConversationTurn]
     turn_id: str
     
-    # Intent classification
-    intent_category: str
-    intent_classification_result: Optional[IntentClassificationResult]
     
     # Product extraction
     product_name: str
@@ -188,6 +185,9 @@ class RAGState(TypedDict):
     ready_to_answer: bool
     needs_clarification: bool
     query_complete: bool
+    
+    # Workflow execution tracking
+    execution_path: List[str]
     
     # Metadata
     category: str

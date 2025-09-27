@@ -13,20 +13,28 @@ from dataclasses import dataclass, asdict
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 
 from .utils import DEFAULT_MAX_TURNS, DEFAULT_MAX_MESSAGES
+from .models import SessionContext
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationTurn:
-    """대화 턴 정보"""
+    """대화 턴 정보 (간소화된 버전)"""
     turn_id: str
     timestamp: datetime
     user_query: str
     ai_response: str
-    category: str
-    product_name: str
-    sources: List[Dict[str, Any]]
-    session_context: Dict[str, Any]
+    category: str = ""
+    product_name: str = ""
+    sources: List[Dict[str, Any]] = None
+    session_context: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        """초기화 후 처리"""
+        if self.sources is None:
+            self.sources = []
+        if self.session_context is None:
+            self.session_context = {}
     
     def to_dict(self) -> Dict[str, Any]:
         """딕셔너리로 변환"""
@@ -53,51 +61,6 @@ class ConversationTurn:
             product_name=data["product_name"],
             sources=data["sources"],
             session_context=data["session_context"]
-        )
-
-@dataclass
-class SessionContext:
-    """세션 컨텍스트 정보"""
-    session_id: str
-    created_at: datetime
-    last_activity: datetime
-    initial_intent: str
-    session_title: str
-    current_topic: str
-    conversation_summary: str
-    user_preferences: Dict[str, Any]
-    active_product: Optional[str] = None
-    conversation_mode: str = "normal"  # normal, product_focused, faq_mode
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """딕셔너리로 변환"""
-        return {
-            "session_id": self.session_id,
-            "created_at": self.created_at.isoformat(),
-            "last_activity": self.last_activity.isoformat(),
-            "initial_intent": self.initial_intent,
-            "session_title": self.session_title,
-            "current_topic": self.current_topic,
-            "conversation_summary": self.conversation_summary,
-            "user_preferences": self.user_preferences,
-            "active_product": self.active_product,
-            "conversation_mode": self.conversation_mode
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'SessionContext':
-        """딕셔너리에서 객체 생성"""
-        return cls(
-            session_id=data["session_id"],
-            created_at=datetime.fromisoformat(data["created_at"]),
-            last_activity=datetime.fromisoformat(data["last_activity"]),
-            initial_intent=data["initial_intent"],
-            session_title=data["session_title"],
-            current_topic=data["current_topic"],
-            conversation_summary=data["conversation_summary"],
-            user_preferences=data["user_preferences"],
-            active_product=data.get("active_product"),
-            conversation_mode=data.get("conversation_mode", "normal")
         )
 
 class SessionManager:
@@ -127,10 +90,12 @@ class SessionManager:
             return self._sessions[session_id]
         
         # 새 세션 생성
+        now = datetime.now()
         context = SessionContext(
             session_id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
+            created_at=now.isoformat(),
+            last_accessed=now.isoformat(),
+            last_activity=now.isoformat(),
             initial_intent="",
             session_title="",
             current_topic="",
@@ -158,7 +123,7 @@ class SessionManager:
             return None
         
         # 마지막 활동 시간 업데이트
-        session.last_activity = datetime.now()
+        session.last_activity = datetime.now().isoformat()
         return session
     
     def update_session(self, session_id: str, **kwargs) -> bool:
@@ -171,7 +136,7 @@ class SessionManager:
             if hasattr(session, key):
                 setattr(session, key, value)
         
-        session.last_activity = datetime.now()
+        session.last_activity = datetime.now().isoformat()
         logger.info(f"[SESSION] Updated session {session_id}: {list(kwargs.keys())}")
         return True
     
@@ -182,19 +147,39 @@ class SessionManager:
         
         self._conversations[session_id].append(turn)
         
-        # 최대 대화 턴 수 제한 (메모리 관리)
-        if len(self._conversations[session_id]) > DEFAULT_MAX_TURNS:
-            self._conversations[session_id] = self._conversations[session_id][-DEFAULT_MAX_TURNS:]
+        # 최대 대화 턴 수 제한 (메모리 관리) - 더 엄격한 제한
+        max_turns = min(DEFAULT_MAX_TURNS, 10)  # 최대 10개 턴으로 제한
+        if len(self._conversations[session_id]) > max_turns:
+            self._conversations[session_id] = self._conversations[session_id][-max_turns:]
+            logger.info(f"[SESSION] Trimmed conversation history to {max_turns} turns for session {session_id}")
         
         logger.info(f"[SESSION] Added turn to session {session_id}: {turn.turn_id}")
         return True
     
     def get_conversation_history(self, session_id: str, limit: int = 10) -> List[ConversationTurn]:
-        """대화 히스토리 조회"""
-        if session_id not in self._conversations:
-            return []
+        """대화 히스토리 조회 (Django에서 로드)"""
+        from .utils import get_django_conversation_history
         
-        return self._conversations[session_id][-limit:]
+        # Django에서 대화 히스토리 로드
+        django_history = get_django_conversation_history(session_id, limit)
+        
+        # Django 데이터를 ConversationTurn 객체로 변환
+        turns = []
+        for item in django_history:
+            turn = ConversationTurn(
+                turn_id=item.get("turn_id", ""),
+                timestamp=datetime.fromisoformat(item.get("timestamp", datetime.now().isoformat())),
+                user_query=item.get("user_query", ""),
+                ai_response=item.get("ai_response", ""),
+                category=item.get("category", ""),
+                product_name=item.get("product_name", ""),
+                sources=item.get("sources", []),
+                session_context=item.get("session_context", {})
+            )
+            turns.append(turn)
+        
+        logger.info(f"📚 [SESSION] Loaded {len(turns)} conversation turns from Django for session {session_id}")
+        return turns
     
     def add_message(self, session_id: str, message: BaseMessage) -> bool:
         """메시지 히스토리에 추가"""
@@ -310,7 +295,8 @@ class SessionManager:
     def _is_session_expired(self, session: SessionContext) -> bool:
         """세션 만료 여부 확인"""
         now = datetime.now()
-        return (now - session.last_activity).total_seconds() > self.session_timeout
+        last_activity = datetime.fromisoformat(session.last_activity) if isinstance(session.last_activity, str) else session.last_activity
+        return (now - last_activity).total_seconds() > self.session_timeout
     
     def get_session_stats(self) -> Dict[str, Any]:
         """세션 통계 정보"""

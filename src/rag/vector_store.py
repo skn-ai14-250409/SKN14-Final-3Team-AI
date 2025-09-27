@@ -19,6 +19,9 @@ class VectorStore:
         self.pc = Pinecone(api_key=PINECONE_KEY)
         self.index_name: str = VECTOR_STORE_INDEX_NAME
         # This should be "openai" or "huggingface"
+        # Embedding 캐싱 (성능 최적화)
+        self._embedding_cache = {}
+        self._index_cache = None
         self.embedding_backend: str = EMBEDDING_BACKEND
 
     def create_index(self) -> None:
@@ -52,9 +55,11 @@ class VectorStore:
             return OpenAIEmbeddings(
                 model=EMBEDDING_MODEL_NAME,
                 api_key=MODEL_KEY,
-                chunk_size=1000,  # 배치 크기 최적화
-                max_retries=1,    # 재시도 횟수 더 제한 (2 → 1)
-                request_timeout=5  # 타임아웃 더 짧게 (10 → 5)
+                chunk_size=500,   # 배치 크기 더 감소 (1000 → 500)
+                max_retries=1,    # 재시도 횟수 제한
+                request_timeout=10, # 타임아웃 적절히 조정
+                retry_min_seconds=1,
+                retry_max_seconds=5
             )
         elif self.embedding_backend == "huggingface":
             return HuggingFaceEmbeddings(
@@ -66,11 +71,12 @@ class VectorStore:
             raise ValueError(f"Unknown embedding backend: {self.embedding_backend}")
 
     def get_index(self) -> PineconeVectorStore:
-        # This uses the Langchain-pinecone library
-        embedding_model = self._get_embedding_model()
-        index = self.pc.Index(self.index_name)
-        vs_index = PineconeVectorStore(index=index, embedding=embedding_model)
-        return vs_index
+        # This uses the Langchain-pinecone library (캐싱 적용)
+        if self._index_cache is None:
+            embedding_model = self._get_embedding_model()
+            index = self.pc.Index(self.index_name)
+            self._index_cache = PineconeVectorStore(index=index, embedding=embedding_model)
+        return self._index_cache
 
     def add_documents_to_index(self, documents: List[Document]) -> List[str]:
         """문서를 인덱스에 추가 (개선된 메타데이터 포함) - 배치 처리"""
@@ -97,8 +103,8 @@ class VectorStore:
             )
             cleaned_documents.append(cleaned_doc)
         
-        # 배치 처리 - OpenAI API 토큰 제한 대응 (배치당 100개 문서)
-        batch_size = 100
+        # 배치 처리 - OpenAI API 토큰 제한 대응 (배치당 50개 문서로 감소)
+        batch_size = 50  # 배치 크기 감소 (100 → 50)
         all_ids = []
         
         for i in range(0, len(cleaned_documents), batch_size):
@@ -121,13 +127,28 @@ class VectorStore:
     
     def similarity_search(self, query: str, k: int = 5, 
                          filter_dict: Optional[Dict[str, Any]] = None) -> List[Document]:
-        """향상된 유사도 검색 - 메타데이터 필터링 지원"""
+        """향상된 유사도 검색 - 메타데이터 필터링 지원 (성능 최적화)"""
         vs_index: PineconeVectorStore = self.get_index()
         
-        if filter_dict:
-            # Pinecone 필터 형식으로 변환
-            results = vs_index.similarity_search(query, k=k, filter=filter_dict)
-        else:
+        try:
+            if filter_dict:
+                # Pinecone 필터 정리 (잘못된 필터 제거)
+                clean_filter = {}
+                for key, value in filter_dict.items():
+                    if isinstance(value, (str, int, float, bool)):
+                        clean_filter[key] = value
+                    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+                        clean_filter[key] = value
+                
+                if clean_filter:
+                    results = vs_index.similarity_search(query, k=k, filter=clean_filter)
+                else:
+                    results = vs_index.similarity_search(query, k=k)
+            else:
+                results = vs_index.similarity_search(query, k=k)
+        except Exception as e:
+            logger.warning(f"Filter search failed, using simple search: {e}")
+            # 필터 검색 실패 시 단순 검색으로 fallback
             results = vs_index.similarity_search(query, k=k)
         
         return results
