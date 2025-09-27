@@ -6,14 +6,15 @@ RAG 워크플로우에서 사용하는 도구들
 
 from langchain_core.tools import tool
 
+
 @tool(parse_docstring=True)
-def general_faq(thought: str, question: str):
+def general_faq(thought: str, query: str):
     """
-    Answer general banking FAQ questions using SLM knowledge.
+    Answer general banking FAQ questions.
     
     Args:
         thought: Reasoning for using this tool (1-3 sentences)
-        question: User's general banking question
+        query: User's general banking question
     """
 
 @tool(parse_docstring=True)
@@ -67,14 +68,14 @@ def guardrail_check(thought: str, response: str):
         response: Generated response to check
     """
 
+
 @tool(parse_docstring=True)
 def intent_classification(thought: str, query: str):
     """
-    Classify user query into one of four categories: general_banking_FAQs, 
-    industry_policies_and_regulations, company_rules, or company_products.
+    Classify user intent for routing.
     
     Args:
-        thought: Reasoning for classification (1-2 sentences)
+        thought: Reasoning for using this tool (1-3 sentences)
         query: User query to classify
     """
 
@@ -85,4 +86,13 @@ def answer(thought: str):
     
     Args:
         thought: Extremely concise reason why ready to answer (3-5 words maximum)
+    """
+
+@tool(parse_docstring=True)
+def context_answer(thought: str):
+    """
+    Generate answer based on previous conversation context.
+    
+    Args:
+        thought: Reasoning for using context-based answer (1-2 sentences)
     """

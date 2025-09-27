@@ -15,7 +15,8 @@ from .tools import (
     session_summary,
     guardrail_check,
     answer,
-    intent_classification
+    intent_classification,
+    context_answer
 )
 
 # 전역 인스턴스
@@ -48,6 +49,7 @@ __all__ = [
     "guardrail_check",
     "answer",
     "intent_classification",
+    "context_answer",
     "get_rag_workflow",
     "get_langgraph_workflow"
 ]
