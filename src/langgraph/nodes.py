@@ -919,17 +919,25 @@ def answer_node(state: RAGState) -> RAGState:
                 logger.info(f"[ANSWER] Considering previous context: {previous_context[:100]}...")
     
     if not response or not response.strip():
-        # FAQ 답변 생성 시도
-        try:
-            slm = get_shared_slm()
-            response = create_simple_response(slm, state.get("query", ""), "faq_system")
-            response = clean_markdown_formatting(response)
-            logger.info("[ANSWER] Generated FAQ response")
-        except Exception as e:
-            logger.error(f"FAQ response generation failed: {e}")
-            # 기본 응답 생성 (RAG 검색이 실패한 경우에만)
-            response = "죄송합니다. 해당 질문에 대한 정보를 찾을 수 없습니다. 다른 키워드로 다시 질문해주시거나 관련 부서에 문의해주세요."
-            logger.info("[ANSWER] Using default response")
+        # 인사말 감지 및 간단한 응답
+        current_query = state.get("query", "").strip().lower()
+        greeting_keywords = ["안녕", "hello", "hi", "하이", "반가", "처음", "시작"]
+        
+        if any(keyword in current_query for keyword in greeting_keywords):
+            response = "안녕하세요! KB금융그룹 상담사입니다. 어떤 도움이 필요하신가요?"
+            logger.info("[ANSWER] Generated greeting response")
+        else:
+            # FAQ 답변 생성 시도
+            try:
+                slm = get_shared_slm()
+                response = create_simple_response(slm, state.get("query", ""), "faq_system")
+                response = clean_markdown_formatting(response)
+                logger.info("[ANSWER] Generated FAQ response")
+            except Exception as e:
+                logger.error(f"FAQ response generation failed: {e}")
+                # 기본 응답 생성 (RAG 검색이 실패한 경우에만)
+                response = "죄송합니다. 해당 질문에 대한 정보를 찾을 수 없습니다. 다른 키워드로 다시 질문해주시거나 관련 부서에 문의해주세요."
+                logger.info("[ANSWER] Using default response")
     
     # 마크다운 형식 제거
     response = clean_markdown_formatting(response)
