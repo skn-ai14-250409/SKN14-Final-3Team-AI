@@ -83,6 +83,13 @@ DEFAULT_MAX_TURNS = 20  # 대화 턴 수 감소 (속도 개선)
 DEFAULT_MAX_MESSAGES = 50  # 메시지 수 감소 (속도 개선)
 DEFAULT_MESSAGE_HISTORY_LIMIT = 20  # 메시지 히스토리 제한 (속도 개선)
 
+# ========== 성능 최적화 상수 ==========
+MAX_CONTEXT_LENGTH = 2000  # 컨텍스트 최대 길이
+MAX_QUERY_LENGTH = 500  # 쿼리 최대 길이
+CACHE_TTL_SECONDS = 300  # 캐시 TTL (5분)
+MAX_CACHE_SIZE = 100  # 최대 캐시 크기
+BATCH_SIZE = 5  # 배치 처리 크기
+
 # ========== 에러 메시지 (prompts.yaml에서 로드) ==========
 
 # ========== 프롬프트 관리 함수들 ==========
@@ -121,7 +128,7 @@ def get_prompt(category: str, **kwargs) -> str:
     Get formatted prompt from YAML template
     
     Args:
-        category: Prompt category (supervisor, etc.)
+        category: Prompt category (supervisor, routing_prompts, etc.)
         **kwargs: Variables to format into the prompt template
         
     Returns:
@@ -129,11 +136,16 @@ def get_prompt(category: str, **kwargs) -> str:
     """
     prompts = load_prompts()
     
-    if category not in prompts.get("system_prompts", {}):
+    # system_prompts 섹션에서 찾기
+    if category in prompts.get("system_prompts", {}):
+        prompt_template = prompts["system_prompts"][category]["system"]
+    # routing_prompts 섹션에서 찾기
+    elif category in prompts.get("routing_prompts", {}):
+        prompt_template = prompts["routing_prompts"][category]
+    else:
         logger.warning(f"Prompt category '{category}' not found")
         return f"프롬프트를 찾을 수 없습니다: {category}"
     
-    prompt_template = prompts["system_prompts"][category]["system"]
     try:
         return prompt_template.format(**kwargs)
     except KeyError as e:
@@ -261,9 +273,12 @@ def format_context(documents: List[Document]) -> str:
         str: 포맷팅된 컨텍스트 문자열
     """
     lines = []
-    max_context_length = 2000  # 컨텍스트 길이 제한
+    current_length = 0
     
     for i, doc in enumerate(documents, 1):
+        if current_length >= MAX_CONTEXT_LENGTH:
+            break
+            
         src = doc.metadata.get("source", f"document_{i}") if doc.metadata else f"document_{i}"
         snippet = doc.page_content.strip()
         if not snippet:
@@ -273,12 +288,9 @@ def format_context(documents: List[Document]) -> str:
         if len(snippet) > 500:
             snippet = snippet[:500] + "..."
         
-        lines.append(f"[source: {src}]\n{snippet}")
-        
-        # 전체 컨텍스트 길이 제한
-        current_length = len("\n---\n".join(lines))
-        if current_length > max_context_length:
-            break
+        line = f"[source: {src}]\n{snippet}"
+        lines.append(line)
+        current_length += len(line) + 5  # "\n---\n" 길이 고려
     
     return "\n---\n".join(lines)
 
@@ -456,18 +468,30 @@ _search_cache = {}  # 검색 결과 캐싱
 _conversation_history_cache = {}  # 대화 히스토리 캐싱
 
 def get_cached_search_result(query: str, product_name: str = "") -> Optional[List[Document]]:
-    """검색 결과 캐시에서 가져오기"""
+    """검색 결과 캐시에서 가져오기 (TTL 체크 포함)"""
     cache_key = f"{query}:{product_name}"
-    return _search_cache.get(cache_key)
+    if cache_key in _search_cache:
+        cache_entry = _search_cache[cache_key]
+        # TTL 체크
+        if time.time() - cache_entry.get("timestamp", 0) < CACHE_TTL_SECONDS:
+            return cache_entry.get("documents")
+        else:
+            # 만료된 캐시 제거
+            del _search_cache[cache_key]
+    return None
 
 def set_cached_search_result(query: str, product_name: str, documents: List[Document]) -> None:
-    """검색 결과 캐시에 저장"""
+    """검색 결과 캐시에 저장 (TTL 포함)"""
     cache_key = f"{query}:{product_name}"
-    _search_cache[cache_key] = documents
+    _search_cache[cache_key] = {
+        "documents": documents,
+        "timestamp": time.time()
+    }
     # 캐시 크기 제한 (메모리 누수 방지)
-    if len(_search_cache) > 100:
-        # 가장 오래된 항목 제거
-        oldest_key = next(iter(_search_cache))
+    if len(_search_cache) > MAX_CACHE_SIZE:
+        # LRU 방식으로 가장 오래된 항목 제거
+        oldest_key = min(_search_cache.keys(), 
+                        key=lambda k: _search_cache[k].get("timestamp", 0))
         del _search_cache[oldest_key]
 
 def get_django_conversation_history(session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -763,4 +787,61 @@ def create_error_response(error_type: str, **kwargs) -> Dict[str, Any]:
         "response": get_error_message(error_type),
         "sources": kwargs.get("sources", []),
         "ready_to_answer": True
+    }
+
+
+# ========== 성능 최적화 유틸리티 함수들 ==========
+
+def optimize_query_length(query: str, max_length: int = MAX_QUERY_LENGTH) -> str:
+    """쿼리 길이 최적화"""
+    if len(query) > max_length:
+        return query[:max_length].rsplit(' ', 1)[0] + "..."
+    return query
+
+
+def batch_process_items(items: List[Any], batch_size: int = BATCH_SIZE) -> List[List[Any]]:
+    """배치 처리로 메모리 효율성 향상"""
+    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def cleanup_expired_cache():
+    """만료된 캐시 정리"""
+    global _search_cache, _conversation_history_cache
+    current_time = time.time()
+    
+    # 검색 캐시 정리
+    expired_keys = []
+    for key, value in _search_cache.items():
+        if current_time - value.get("timestamp", 0) > CACHE_TTL_SECONDS:
+            expired_keys.append(key)
+    
+    for key in expired_keys:
+        del _search_cache[key]
+    
+    # 대화 히스토리 캐시 정리
+    expired_history_keys = []
+    for key, value in _conversation_history_cache.items():
+        if current_time - value.get("timestamp", 0) > CACHE_TTL_SECONDS:
+            expired_history_keys.append(key)
+    
+    for key in expired_history_keys:
+        del _conversation_history_cache[key]
+    
+    if expired_keys or expired_history_keys:
+        logger.info(f"🧹 [CACHE] Cleaned up {len(expired_keys)} search cache and {len(expired_history_keys)} history cache entries")
+
+
+def get_memory_usage() -> Dict[str, Any]:
+    """메모리 사용량 모니터링"""
+    import psutil
+    import os
+    
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    
+    return {
+        "rss_mb": memory_info.rss / 1024 / 1024,  # 실제 메모리 사용량
+        "vms_mb": memory_info.vms / 1024 / 1024,  # 가상 메모리 사용량
+        "cache_size": len(_search_cache),
+        "history_cache_size": len(_conversation_history_cache)
     }

@@ -56,10 +56,10 @@ class VectorStore:
                 model=EMBEDDING_MODEL_NAME,
                 api_key=MODEL_KEY,
                 chunk_size=500,   # 배치 크기 더 감소 (1000 → 500)
-                max_retries=1,    # 재시도 횟수 제한
-                request_timeout=10, # 타임아웃 적절히 조정
+                max_retries=3,    # 재시도 횟수 증가 (1 → 3)
+                request_timeout=30, # 타임아웃 증가 (10 → 30)
                 retry_min_seconds=1,
-                retry_max_seconds=5
+                retry_max_seconds=10  # 최대 재시도 간격 증가 (5 → 10)
             )
         elif self.embedding_backend == "huggingface":
             return HuggingFaceEmbeddings(

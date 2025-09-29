@@ -87,6 +87,8 @@ def answer(thought: str):
     Args:
         thought: Extremely concise reason why ready to answer (3-5 words maximum)
     """
+    # FAQ 답변 생성 로직이 필요함
+    # 현재는 빈 함수이므로 실제 답변이 생성되지 않음
 
 @tool(parse_docstring=True)
 def context_answer(thought: str):
