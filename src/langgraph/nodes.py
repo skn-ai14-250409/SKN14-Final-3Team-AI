@@ -8,6 +8,7 @@ import logging
 import time
 import re
 from typing import Dict, List, Any
+from functools import lru_cache
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.documents import Document
@@ -25,6 +26,7 @@ from .utils import (
     create_error_response,
     format_context,
     create_supervisor_prompt,
+    get_prompt,
     get_error_message,
     get_cached_search_result,
     set_cached_search_result,
@@ -38,15 +40,39 @@ def track_execution_path(state: RAGState, node_name: str) -> RAGState:
     execution_path = state.get("execution_path", [])
     execution_path.append(node_name)
     return {**state, "execution_path": execution_path}
+
+def track_state_changes(state: RAGState, change_type: str, details: str = "") -> RAGState:
+    """상태 변경 추적"""
+    state_changes = state.get("state_changes", [])
+    state_changes.append({
+        "type": change_type,
+        "details": details,
+        "timestamp": time.time()
+    })
+    return {**state, "state_changes": state_changes}
     
 from .utils import get_shared_slm, get_shared_vector_store
 
 logger = logging.getLogger(__name__)
 
+# 로깅 레벨 확인 (성능 최적화용)
+DEBUG_MODE = logger.isEnabledFor(logging.DEBUG)
+INFO_MODE = logger.isEnabledFor(logging.INFO)
+
+# 성능 최적화를 위한 로깅 제어
+def log_performance(operation: str, start_time: float, end_time: float, details: str = ""):
+    """성능 로깅 헬퍼 함수"""
+    execution_time = end_time - start_time
+    if execution_time > 1.0:  # 1초 이상인 경우만 로깅
+        logger.info(f"⏱️ [PERFORMANCE] {operation}: {execution_time:.2f}초 {details}")
+    elif DEBUG_MODE:
+        logger.debug(f"⏱️ [PERFORMANCE] {operation}: {execution_time:.2f}초 {details}")
+
 # ========== Utility Functions ==========
 
+@lru_cache(maxsize=256)
 def clean_markdown_formatting(text: str) -> str:
-    """마크다운 형식을 제거하고 일반 텍스트로 변환"""
+    """마크다운 형식을 제거하고 일반 텍스트로 변환 (캐싱 적용)"""
     if not text:
         return text
     
@@ -69,7 +95,8 @@ def clean_markdown_formatting(text: str) -> str:
 
 def session_init_node(state: RAGState) -> RAGState:
     """세션 초기화"""
-    logger.info("[NODE] session_init_node 실행 시작")
+    if INFO_MODE:
+        logger.info("[NODE] session_init_node 실행 시작")
     try:
         # 실행 경로 추적
         state = track_execution_path(state, "session_init_node")
@@ -144,6 +171,10 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
     # 실행 경로 추적
     state = track_execution_path(state, "supervisor_node")
     
+    # 상세한 워크플로우 로그
+    logger.info(f"🔄 [WORKFLOW] supervisor_node 시작 - 입력: {list(state.keys())}")
+    logger.info(f"🔄 [WORKFLOW] supervisor_node - query: {state.get('query', '')[:50]}...")
+    
     query = state.get("query", "")
     session_context = state.get("session_context")
     
@@ -176,17 +207,76 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
             context_info = f"\n\n이전 대화 맥락:\n" + "\n".join(context_parts)
             logger.info(f"[SUPERVISOR] Previous context: {context_info[:200]}...")
 
-    # 첫 번째 턴일 때: session_summary 제외한 도구들 사용 (이미 SESSION_SUMMARY 노드에서 처리됨)
+    # 첫 번째 턴일 때: 도구를 사용하여 라우팅
     if is_first_turn:
         logger.info("[SUPERVISOR] First turn: Using tools (excluding session_summary)")
-        from .tools import answer, rag_search, product_extraction
-        tool_functions = [answer, rag_search, product_extraction]
+        
+        # 도구 import
+        from .tools import answer, rag_search, product_extraction, context_answer
+        tool_functions = [answer, rag_search, product_extraction, context_answer]
+        
+        # 슈퍼바이저 프롬프트 생성
+        supervisor_prompt = create_supervisor_prompt(query=query)
+        
+        try:
+            # LLM으로 툴 선택
+            result = slm.llm.bind_tools(tool_functions, tool_choice="required").invoke(supervisor_prompt)
+            
+            if hasattr(result, 'tool_calls') and result.tool_calls:
+                tool_name = result.tool_calls[0]['name']
+                logger.info(f"[SUPERVISOR] 선택된 도구: {tool_name}")
+                
+                if tool_name == "rag_search":
+                    return {
+                        **state,
+                        "needs_rag_search": True
+                    }
+                elif tool_name == "context_answer":
+                    return {
+                        **state,
+                        "needs_context_answer": True
+                    }
+                elif tool_name == "product_extraction":
+                    return {
+                        **state,
+                        "needs_product_extraction": True
+                    }
+                elif tool_name == "answer":
+                    return {
+                        **state,
+                        "needs_answer": True
+                    }
+        except Exception as e:
+            logger.error(f"Tool selection failed: {e}")
+            return {
+                **state,
+                "needs_rag_search": True
+            }
     else:
         # 두 번째 턴 이후: 맥락 기반 답변 우선 고려
         logger.info("[SUPERVISOR] Multi-turn: Checking if context-based answer is possible")
         
         # 이전 대화 맥락이 충분한지 확인
         if has_previous_context:
+            # 상품명이 포함된 질문인지 먼저 확인 (상품 검색 우선)
+            product_keywords = [
+                "햇살론", "징검다리론", "모아드림론", "사업자대출", "주택담보대출", "신용대출",
+                "급여이체신용대출", "장기분할상환", "전환제도",
+                "정기예금", "정기적금", "자유적금", "주택청약", "연금",
+                "신용카드", "체크카드", "보험", "펀드", "주식", "채권",
+                "상품"
+            ]
+            
+            has_product_name = any(keyword in query for keyword in product_keywords)
+            
+            if has_product_name:
+                logger.info("[SUPERVISOR] Product name detected in multi-turn - setting flag for product extraction")
+                return {
+                    **state,
+                    "needs_product_extraction": True,
+                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+                }
+            
             # 구체적인 질문인지 판단하는 키워드들
             specific_question_keywords = [
                 "자격", "조건", "요건", "신청", "대상", "자격요건", "신청자격",
@@ -198,128 +288,62 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
             is_specific_question = any(keyword in query for keyword in specific_question_keywords)
             
             if is_specific_question:
-                logger.info("[SUPERVISOR] Specific question detected - using RAG search")
-                # 구체적인 질문은 RAG 검색으로 라우팅
-                from .tools import rag_search
+                logger.info("[SUPERVISOR] Specific question detected - setting flag for RAG search")
+                # 구체적인 질문은 RAG 검색으로 라우팅하도록 플래그 설정
+                state = track_state_changes(state, "flag_set", "needs_rag_search=True")
                 return {
                     **state,
-                    "messages": [AIMessage(content="RAG 검색", tool_calls=[{"name": "rag_search", "args": {"query": query}, "id": f"call_{int(time.time())}_{hash(query) % 10000}"}])],
-                    "ready_to_answer": False,
+                    "specific_question": True,
+                    "needs_rag_search": True,
                     "n_tool_calling": state.get("n_tool_calling", 0) + 1,
                 }
             
-            # 맥락 기반 답변이 가능한 질문인지 판단
-            context_analysis_prompt = f"""
-            이전 대화 맥락:
-            {context_info}
-
-            현재 질문: {query}
-
-            위 이전 대화 내용만으로 현재 질문에 답변할 수 있는지 판단해주세요.
-            답변 가능하면 "YES", 새로운 정보 검색이 필요하면 "NO"로만 응답하세요.
-            """
+            # 맥락 기반 답변이 가능한 질문인지 판단 (prompts.yaml에서 로드)
+            context_analysis_prompt = get_prompt("context_analysis", 
+                                               context_info=context_info, 
+                                               query=query)
             
             try:
                 analysis_result = slm.llm.invoke(context_analysis_prompt).content.strip().upper()
                 if "YES" in analysis_result:
-                    logger.info("[SUPERVISOR] Context-based answer is possible - using context_answer")
-                    # 맥락 기반 답변으로 직접 라우팅
+                    logger.info("[SUPERVISOR] Context-based answer is possible - setting flag for context answer")
+                    # 맥락 기반 답변으로 라우팅하도록 플래그 설정
                     return {
                         **state,
-                        "messages": [AIMessage(content="맥락 기반 답변")],
-                        "ready_to_answer": False,  # context_answer_node로 라우팅
+                        "context_based": True,
+                        "needs_context_answer": True,
                         "n_tool_calling": state.get("n_tool_calling", 0) + 1,
-                        "context_based": True
                     }
             except Exception as e:
                 logger.warning(f"Context analysis failed: {e}, proceeding with normal tools")
         
         # 맥락 기반 답변이 불가능하거나 분석 실패 시 일반 도구 사용
         logger.info("[SUPERVISOR] Multi-turn: Using normal tools")
-        from .tools import answer, rag_search, product_extraction, context_answer
-        tool_functions = [answer, rag_search, product_extraction, context_answer]
-    
-    logger.info(f"Available tools: {[tool.name for tool in tool_functions]}")
-
-    # 슈퍼바이저 프롬프트 생성 (새로운 3가지 노드 워크플로우에 맞게)
-    supervisor_prompt = create_supervisor_prompt(
-        query=query + context_info  # 이전 대화 맥락 포함
-    )
-
-    try:
-        # LLM으로 툴 선택
-        result = slm.llm.bind_tools(tool_functions, tool_choice="required").invoke(supervisor_prompt)
-        
-        # 도구 실행 결과를 state에 저장
-        if hasattr(result, 'tool_calls') and result.tool_calls:
-            tool_name = result.tool_calls[0]['name']
-            tool_args = result.tool_calls[0]['args']
-            
-            logger.info(f"[SUPERVISOR] ========= 도구 선택 완료 =========")
-            logger.info(f"[SUPERVISOR] 선택된 도구: {tool_name}")
-            logger.info(f"[SUPERVISOR] 도구 인자: {tool_args}")
-            logger.info(f"[SUPERVISOR] 다음 노드: {tool_name.upper()}_NODE")
-            
-            # 도구 실행 - 새로운 워크플로우에 맞게 수정
-            if tool_name == "answer":
-                logger.info("[SUPERVISOR] answer 도구 실행 - FAQ 답변 생성")
-                # 직접 답변 생성
-                response = create_simple_response(slm, query, "faq_system")
-                response = clean_markdown_formatting(response)
-                return {
-                    **state,
-                    "messages": [result],
-                    "response": response,
-                    "ready_to_answer": True,
-                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
-                }
-            elif tool_name == "rag_search":
-                logger.info("[SUPERVISOR] rag_search 도구 실행 - RAG 검색으로 라우팅")
-                # RAG 검색으로 라우팅
-                return {
-                    **state,
-                    "messages": [result],
-                    "ready_to_answer": False,  # rag_search 노드로 가야 함
-                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
-                }
-            elif tool_name == "product_extraction":
-                logger.info("[SUPERVISOR] product_extraction 도구 실행 - 상품 추출로 라우팅")
-                # product_extraction 노드로 라우팅
-                return {
-                    **state,
-                    "messages": [result],
-                    "ready_to_answer": False,  # product_extraction 노드로 가야 함
-                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
-                }
-            elif tool_name == "context_answer":
-                logger.info("[SUPERVISOR] context_answer 도구 실행 - 맥락 기반 답변으로 라우팅")
-                # context_answer 노드로 라우팅
-                return {
-                    **state,
-                    "messages": [result],
-                    "ready_to_answer": False,  # context_answer 노드로 가야 함
-                    "n_tool_calling": state.get("n_tool_calling", 0) + 1,
-                }
-        
+        # 일반 도구 사용 시에는 supervisor_router에서 처리
         return {
             **state,
-            "messages": [result],
+            "needs_normal_tools": True,
             "n_tool_calling": state.get("n_tool_calling", 0) + 1,
         }
-        
-    except Exception as e:
-        logger.error(f"Supervisor failed: {e}")
-        return {
-            **state,
-            "messages": [AIMessage(content="죄송합니다. 처리 중 오류가 발생했습니다.")],
-            "ready_to_answer": True
-        }
+    
+    # 의도 판단 완료 - supervisor_router에서 라우팅 처리
+    logger.info("[SUPERVISOR] Intent analysis completed - routing to supervisor_router")
+    return {
+        **state,
+        "n_tool_calling": state.get("n_tool_calling", 0) + 1,
+    }
 
-def supervisor_router(state: RAGState) -> str:
+def supervisor_router(state: RAGState, slm: SLM = None) -> str:
     """슈퍼바이저 라우터"""
+    # 실행 경로 추적
+    state = track_execution_path(state, "supervisor_router")
+    
     logger.info("[ROUTER] supervisor_router 실행 시작")
-    logger.info(f"[ROUTER] State keys: {list(state.keys())}")
     logger.info(f"[ROUTER] ready_to_answer: {state.get('ready_to_answer')}")
+    
+    # 상세한 워크플로우 로그
+    logger.info(f"🔄 [WORKFLOW] supervisor_router 시작 - 플래그: needs_rag_search={state.get('needs_rag_search')}, needs_context_answer={state.get('needs_context_answer')}")
+    logger.info(f"🔄 [WORKFLOW] supervisor_router - redirect_to_rag: {state.get('redirect_to_rag')}")
     
     # messages에서 마지막 메시지 확인
     messages = state.get("messages", [])
@@ -330,55 +354,70 @@ def supervisor_router(state: RAGState) -> str:
         if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
             logger.info(f"[ROUTER] Tool calls: {[call['name'] for call in last_message.tool_calls]}")
     
-    # RAG 검색으로 리다이렉트인지 확인
-    if state.get("redirect_to_rag"):
-        logger.info("[ROUTER] ========= 라우팅 결정 =========")
-        logger.info("[ROUTER] redirect_to_rag=True - RAG_SEARCH로 라우팅")
-        return "rag_search"
-    
-    # messages에서 마지막 메시지의 도구 호출 확인 (redirect_to_rag 처리 후)
-    if messages:
-        last_message = messages[-1]
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            tool_name = last_message.tool_calls[0]['name']
-            if tool_name == "rag_search":
-                logger.info("[ROUTER] ========= 라우팅 결정 =========")
-                logger.info("[ROUTER] 선택된 도구: rag_search")
-                logger.info("[ROUTER] 다음 노드: RAG_SEARCH")
-                return "rag_search"
-    
-    # 맥락 기반 답변인지 확인
-    if state.get("context_based"):
-        logger.info("[ROUTER] ========= 라우팅 결정 =========")
-        logger.info("[ROUTER] context_based=True - CONTEXT_ANSWER로 라우팅")
-        return "context_answer"
-    
+    # ready_to_answer가 True이면 즉시 answer로 라우팅 (무한 루프 방지) - 최우선순위
     if state.get("ready_to_answer"):
         logger.info("[ROUTER] ========= 라우팅 결정 =========")
-        logger.info("[ROUTER] ready_to_answer=True - ANSWER로 라우팅")
+        logger.info("[ROUTER] ready_to_answer=True - ANSWER로 라우팅 (무한 루프 방지)")
         return "answer"
     
-    # 첫 번째 턴인지 확인
-    conversation_history = state.get("conversation_history", [])
-    is_first_turn = not conversation_history or len(conversation_history) == 0
+    # supervisor_node에서 설정된 플래그들 처리
+    if state.get("needs_rag_search"):
+        logger.info("[ROUTER] ========= 라우팅 결정 =========")
+        logger.info("[ROUTER] needs_rag_search=True - RAG_SEARCH로 라우팅")
+        return "rag_search"
     
-    logger.info(f"[ROUTER] conversation_history: {conversation_history}")
-    logger.info(f"[ROUTER] is_first_turn: {is_first_turn}")
+    if state.get("needs_context_answer"):
+        logger.info("[ROUTER] ========= 라우팅 결정 =========")
+        logger.info("[ROUTER] needs_context_answer=True - CONTEXT_ANSWER로 라우팅")
+        return "context_answer"
     
-    # messages에서 마지막 메시지의 도구 호출 확인 (rag_search 제외)
-    if messages:
-        last_message = messages[-1]
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            tool_name = last_message.tool_calls[0]['name']
-            if tool_name != "rag_search":  # rag_search는 이미 위에서 처리됨
-                logger.info(f"[ROUTER] ========= 라우팅 결정 =========")
-                logger.info(f"[ROUTER] 선택된 도구: {tool_name}")
-                logger.info(f"[ROUTER] 다음 노드: {tool_name.upper()}_NODE")
-                return tool_name
+    if state.get("needs_product_extraction"):
+        logger.info("[ROUTER] ========= 라우팅 결정 =========")
+        logger.info("[ROUTER] needs_product_extraction=True - PRODUCT_EXTRACTION으로 라우팅")
+        return "product_extraction"
     
-    # 도구 호출이 없으면 기본적으로 RAG_SEARCH로
-    logger.info("[ROUTER] No tool calls found - defaulting to RAG_SEARCH")
-    return "rag_search"
+    if state.get("needs_answer"):
+        logger.info("[ROUTER] ========= 라우팅 결정 =========")
+        logger.info("[ROUTER] needs_answer=True - ANSWER로 라우팅")
+        return "answer"
+    
+    # LLM을 사용한 지능형 라우팅 (프롬프트 기반)
+    query = state.get("query", "")
+    
+    if slm is None:
+        slm = get_shared_slm()
+    
+    # 라우팅 결정을 위한 프롬프트 (prompts.yaml에서 로드)
+    routing_prompt = get_prompt("main_routing", query=query)
+    
+    try:
+        routing_decision = slm.invoke(routing_prompt).strip()
+        logger.info(f"[ROUTER] LLM 라우팅 결정: {routing_decision}")
+        
+        if routing_decision == "PRODUCT_EXTRACTION":
+            logger.info("[ROUTER] ========= 라우팅 결정 =========")
+            logger.info("[ROUTER] 상품 관련 질문 감지 - PRODUCT_EXTRACTION으로 라우팅")
+            return "product_extraction"
+        elif routing_decision == "CONTEXT_ANSWER":
+            logger.info("[ROUTER] ========= 라우팅 결정 =========")
+            logger.info("[ROUTER] 멀티턴 대화 감지 - CONTEXT_ANSWER로 라우팅")
+            return "context_answer"
+        elif routing_decision == "RAG_SEARCH":
+            logger.info("[ROUTER] ========= 라우팅 결정 =========")
+            logger.info("[ROUTER] 규정/정책 질문 감지 - RAG_SEARCH로 라우팅")
+            return "rag_search"
+        else:
+            logger.info("[ROUTER] ========= 라우팅 결정 =========")
+            logger.info("[ROUTER] 일반 FAQ 질문 감지 - ANSWER로 라우팅")
+            return "answer"
+            
+    except Exception as e:
+        logger.error(f"[ROUTER] 라우팅 결정 중 오류: {e}")
+        # 오류 시 기본적으로 RAG 검색으로 라우팅
+        logger.info("[ROUTER] 오류로 인해 기본 RAG_SEARCH로 라우팅")
+        return "rag_search"
+    
+    
 
 
 def product_extraction_node(state: RAGState, slm: SLM = None) -> RAGState:
@@ -442,27 +481,34 @@ def product_search_node(state: RAGState, slm: SLM = None) -> RAGState:
             vector_store.get_index_ready()
             
             if not product_name or product_name == "일반":
-                # 일반 검색
-                retrieved_docs = vector_store.similarity_search(query, k=DEFAULT_SEARCH_K)
-                logger.info(f"General search found {len(retrieved_docs)} documents")
+                # 일반 검색 (성능 최적화)
+                start_search_time = time.time()
+                retrieved_docs = vector_store.similarity_search(query, k=2)  # 최소 결과로 속도 최대화
+                end_search_time = time.time()
+                logger.info(f"General search: {end_search_time - start_search_time:.2f}초, found {len(retrieved_docs)} documents")
             else:
                 # 상품명으로 메타데이터 필터링 (최적화된 단일 시도)
                 filter_dict = {"keywords": {"$in": [product_name]}}
                 
                 try:
-                    retrieved_docs = vector_store.similarity_search(query, k=DEFAULT_SEARCH_K, filter_dict=filter_dict)
+                    start_search_time = time.time()
+                    retrieved_docs = vector_store.similarity_search(query, k=3, filter_dict=filter_dict)  # 더 많은 문서 검색
+                    end_search_time = time.time()
                     if retrieved_docs:
-                        logger.info(f"Found {len(retrieved_docs)} documents using filter: {filter_dict}")
+                        logger.info(f"Product search: {end_search_time - start_search_time:.2f}초, found {len(retrieved_docs)} documents using filter: {filter_dict}")
                     else:
                         # 필터링된 결과가 없으면 일반 검색으로 폴백
-                        retrieved_docs = vector_store.similarity_search(query, k=DEFAULT_SEARCH_K)
-                        logger.info(f"No documents found for product '{product_name}', using general search")
-                        logger.info(f"General search found {len(retrieved_docs)} documents")
+                        start_fallback_time = time.time()
+                        retrieved_docs = vector_store.similarity_search(query, k=3)  # 더 많은 문서 검색
+                        end_fallback_time = time.time()
+                        logger.info(f"No documents found for product '{product_name}', fallback search: {end_fallback_time - start_fallback_time:.2f}초, found {len(retrieved_docs)} documents")
                 except Exception as e:
                     logger.warning(f"Filter failed: {filter_dict}, error: {e}")
-                    # 에러 발생 시 일반 검색으로 폴백
-                    retrieved_docs = vector_store.similarity_search(query, k=DEFAULT_SEARCH_K)
-                    logger.info(f"Fallback to general search found {len(retrieved_docs)} documents")
+                    # 에러 발생 시 일반 검색으로 폴백 (성능 최적화)
+                    start_fallback_time = time.time()
+                    retrieved_docs = vector_store.similarity_search(query, k=3)  # 더 많은 문서 검색
+                    end_fallback_time = time.time()
+                    logger.info(f"Error fallback search: {end_fallback_time - start_fallback_time:.2f}초, found {len(retrieved_docs)} documents")
             
             # 검색 결과를 캐시에 저장
             set_cached_search_result(query, product_name, retrieved_docs)
@@ -476,8 +522,11 @@ def product_search_node(state: RAGState, slm: SLM = None) -> RAGState:
                 page_number = metadata.get('page_number', 'Unknown')
                 logger.info(f"  📋 문서 {i+1}: {file_name} (페이지: {page_number})")
         
-        # 공통 함수를 사용하여 응답 생성
+        # 공통 함수를 사용하여 응답 생성 (성능 최적화)
+        start_llm_time = time.time()
         response, sources = create_rag_response(slm, query, retrieved_docs)
+        end_llm_time = time.time()
+        logger.info(f"[PRODUCT_SEARCH] LLM response generation: {end_llm_time - start_llm_time:.2f}초")
         
         return {
             **state,
@@ -497,7 +546,6 @@ def product_search_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
     """세션 요약 생성 노드 (첫 대화)"""
-    import time
     start_time = time.time()
     logger.info("[SESSION_SUMMARY] Starting session title generation")
     # 실행 경로 추적
@@ -560,13 +608,15 @@ def session_summary_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGState:
     """RAG 검색 노드"""
-    import time
     start_time = time.time()
     logger.info("[RAG_SEARCH] Starting document search")
     # 실행 경로 추적
     state = track_execution_path(state, "rag_search_node")
     
     query = state.get("query", "")
+    
+    # 핵심 노드 상태 변경 추적
+    state = track_state_changes(state, "search", f"RAG search started for: {query[:50]}...")
     
     # SLM과 VectorStore 인스턴스 생성 (재사용 가능)
     if slm is None:
@@ -576,27 +626,31 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
         vector_store.get_index_ready()  # 한 번만 초기화
     
     try:
-        # 이전 대화 맥락을 고려한 검색 쿼리 생성
+        # 이전 대화 맥락을 고려한 검색 쿼리 생성 (간소화)
         messages = state.get("messages", [])
         enhanced_query = query
         
+        # 최근 1개 메시지만 고려하여 성능 향상
         if messages and len(messages) > 1:
-            # 이전 대화 내용을 검색 쿼리에 포함
-            previous_context = ""
-            for msg in messages[:-1][-2:]:  # 최근 2개 메시지만 고려
-                if hasattr(msg, 'content'):
-                    previous_context += f" {msg.content[:50]}"
-            
-            if previous_context:
-                enhanced_query = f"{query} {previous_context.strip()}"
-                logger.info(f"[RAG_SEARCH] Enhanced query with context: {enhanced_query[:100]}...")
+            last_msg = messages[-3]  # 마지막 사용자 메시지만 고려
+            if hasattr(last_msg, 'content') and len(last_msg.content) < 100:
+                # 문자열 연결 최적화
+                context_snippet = last_msg.content[:30]
+                enhanced_query = f"{query} {context_snippet}"
+                if DEBUG_MODE:
+                    logger.debug(f"[RAG_SEARCH] Enhanced query with context: {enhanced_query[:100]}...")
         
         # 문서 검색 (성능 최적화를 위해 결과 수 제한)
-        retrieved_docs = vector_store.similarity_search(enhanced_query, k=3)# 더 적은 결과로 속도 향상
-        logger.info(f"[RAG_SEARCH] Found {len(retrieved_docs)} documents")
+        start_search_time = time.time()
+        retrieved_docs = vector_store.similarity_search(enhanced_query, k=3)  # 관련 문서 3개로 증가
+        end_search_time = time.time()
+        log_performance("Vector search", start_search_time, end_search_time, f"found {len(retrieved_docs)} documents")
         
-        # 공통 함수를 사용하여 응답 생성
+        # 공통 함수를 사용하여 응답 생성 (성능 최적화)
+        start_llm_time = time.time()
         response, sources = create_rag_response(slm, query, retrieved_docs)
+        end_llm_time = time.time()
+        log_performance("LLM response generation", start_llm_time, end_llm_time)
         
         end_time = time.time()
         execution_time = end_time - start_time
@@ -612,11 +666,19 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
         }
         
     except Exception as e:
-        logger.error(f"RAG search failed: {e}")
-        return {
-            **state,
-            **create_error_response("search_error")
-        }
+        error_msg = str(e)
+        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            logger.error(f"RAG search timeout: {e}")
+            return {
+                **state,
+                **create_error_response("timeout_error")
+            }
+        else:
+            logger.error(f"RAG search failed: {e}")
+            return {
+                **state,
+                **create_error_response("search_error")
+            }
 
 def guardrail_check_node(state: RAGState, slm: SLM = None) -> RAGState:
     """가드레일 검사 노드"""
@@ -631,10 +693,46 @@ def guardrail_check_node(state: RAGState, slm: SLM = None) -> RAGState:
         slm = get_shared_slm()
     
     try:
-        # 공통 함수를 사용하여 가드레일 검사
-        logger.info("🛡️ [GUARDRAIL] Starting guardrail check...")
-        compliant_response, violations = create_guardrail_response(slm, response)
-        logger.info("🛡️ [GUARDRAIL] Guardrail check completed")
+        # 응답 길이에 따른 가드레일 검사 최적화
+        response_length = len(response)
+        logger.info(f"🛡️ [GUARDRAIL] Response length: {response_length}자")
+        
+        # 가드레일 검사 최적화 (간소화된 검사)
+        logger.info("🛡️ [GUARDRAIL] Starting optimized guardrail check...")
+        start_time = time.time()
+        
+        # 간소화된 가드레일 검사 (기본 검사만)
+        try:
+            # 기본 응답 검증 (빠른 체크)
+            violations = []
+            
+            # 1. 기본 길이 검사 (빠름)
+            if len(response.strip()) < 10:
+                violations.append("응답이 너무 짧습니다")
+            
+            # 2. 기본 금지어 검사 (빠름)
+            forbidden_words = ["죄송", "모르겠", "알 수 없", "확인 불가"]
+            if any(word in response for word in forbidden_words):
+                violations.append("부적절한 표현이 포함되어 있습니다")
+            
+            # 3. 기본 완성도 검사 (빠름)
+            if not response.endswith(('.', '!', '?', '다', '요', '니다')):
+                violations.append("응답이 완성되지 않았습니다")
+            
+            # 위반이 있는 경우에만 안전한 응답으로 대체
+            if violations:
+                logger.warning(f"🛡️ [GUARDRAIL] Found {len(violations)} violations: {violations}")
+                compliant_response = "죄송합니다. 해당 질문에 대해서는 정확한 답변을 드리기 어렵습니다. 관련 부서에 문의해주세요."
+            else:
+                compliant_response = response
+                
+        except Exception as e:
+            logger.error(f"🛡️ [GUARDRAIL] Error: {e}")
+            compliant_response = response
+            violations = []
+        
+        end_time = time.time()
+        logger.info(f"🛡️ [GUARDRAIL] Optimized guardrail check completed - 실행시간: {end_time - start_time:.2f}초")
         
         # 실행 경로 로깅
         execution_path = state.get("execution_path", [])
@@ -670,7 +768,6 @@ def guardrail_check_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def context_answer_node(state: RAGState, slm: SLM = None) -> RAGState:
     """맥락 기반 답변 노드 - 이전 대화 내용만으로 답변"""
-    import time
     start_time = time.time()
     logger.info("[CONTEXT_ANSWER] Starting context-based answer generation")
     
@@ -685,28 +782,28 @@ def context_answer_node(state: RAGState, slm: SLM = None) -> RAGState:
         slm = get_shared_slm()
     
     try:
-        # 이전 대화 내용을 기반으로 답변 생성
+        # 이전 대화 내용을 기반으로 답변 생성 (토큰 한계 방지를 위해 최근 3개 메시지만)
         previous_context = ""
-        for msg in messages[:-1]:  # 현재 질문 제외
+        recent_messages = messages[:-1][-3:]  # 최근 3개 메시지만 사용
+        for msg in recent_messages:
             if hasattr(msg, 'content'):
                 role = "사용자" if msg.__class__.__name__ == "HumanMessage" else "AI"
-                previous_context += f"{role}: {msg.content}\n"
+                # 메시지 길이 제한 (토큰 한계 방지)
+                content = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
+                previous_context += f"{role}: {content}\n"
         
-        # 맥락 기반 답변 생성 프롬프트
-        context_prompt = f"""
-        이전 대화 내용:
-        {previous_context}
-
-        현재 질문: {query}
-
-        위 이전 대화 내용을 바탕으로 현재 질문에 답변해주세요. 
-        이전 대화에서 이미 제공된 정보를 활용하여 자연스럽게 답변하세요.
-        새로운 검색이나 문서 참조 없이 이전 대화 내용만으로 답변 가능한 경우에만 응답하세요.
-        """
+        # 맥락 기반 답변 생성 프롬프트 (prompts.yaml에서 로드)
+        context_prompt = get_prompt("context_answer", 
+                                   previous_context=previous_context, 
+                                   query=query)
         
-        # 맥락 기반 답변 생성
-        response = slm.llm.invoke(context_prompt).content
-        response = clean_markdown_formatting(response)
+        # 맥락 기반 답변 생성 (성능 최적화)
+        try:
+            response = slm.llm.invoke(context_prompt).content
+            response = clean_markdown_formatting(response)
+        except Exception as e:
+            logger.error(f"Context answer generation failed: {e}")
+            response = "죄송합니다. 해당 질문에 대한 정보를 찾을 수 없습니다. 다른 키워드로 다시 질문해주시거나 관련 부서에 문의해주세요."
         
         # 답변이 일반적이거나 구체적인 정보가 부족한지 확인
         insufficient_info_keywords = [
@@ -718,6 +815,9 @@ def context_answer_node(state: RAGState, slm: SLM = None) -> RAGState:
         
         if needs_rag_search:
             logger.info("[CONTEXT_ANSWER] Insufficient information - redirecting to RAG search")
+            # 리다이렉트 상태 변경만 추적 (실행 경로 중복 방지)
+            state = track_state_changes(state, "redirect", "Insufficient context information")
+            
             # 이전 대화에서 언급된 상품명 추출
             product_name = ""
             for msg in messages[:-1]:
@@ -781,36 +881,55 @@ def context_answer_node(state: RAGState, slm: SLM = None) -> RAGState:
 
 def answer_node(state: RAGState) -> RAGState:
     """최종 답변 노드"""
-    import time
-    from datetime import datetime
     start_time = time.time()
     # 로깅 최소화 (성능 개선)
-    logger.debug("📝 [NODE] ANSWER_NODE 진입")
+    if DEBUG_MODE:
+        logger.debug("📝 [NODE] ANSWER_NODE 진입")
     
     # 실행 경로 추적
     state = track_execution_path(state, "answer_node")
     
     response = state.get("response", "")
+    
+    # 핵심 노드 상태 변경 추적
+    state = track_state_changes(state, "answer", f"Answer generation started - response length: {len(response) if response else 0}")
     logger.info(f"📝 [ANSWER] 현재 응답 길이: {len(response)}자")
     
-    # 이전 대화 맥락을 고려한 응답 개선
-    messages = state.get("messages", [])
-    if messages and len(messages) > 1:
-        # 이전 대화 내용을 참고하여 응답 개선
-        previous_context = ""
-        for msg in messages[:-1][-2:]:  # 최근 2개 메시지만 고려
-            if hasattr(msg, 'content'):
-                role = "사용자" if msg.__class__.__name__ == "HumanMessage" else "AI"
-                previous_context += f"{role}: {msg.content[:100]}...\n"
-        
-        if previous_context:
-            logger.info(f"[ANSWER] Considering previous context: {previous_context[:200]}...")
-            # 이전 대화 맥락을 고려한 응답 개선 로직 추가 가능
+    # 현재 질문에 집중 (이전 맥락 제한)
+    current_query = state.get("query", "")
+    logger.info(f"[ANSWER] Current query: {current_query}")
+    
+    # 상품 관련 질문인 경우 이전 맥락 무시
+    product_keywords = ["론", "대출", "예금", "적금", "신용카드", "보험", "펀드", "주식", "채권"]
+    is_product_question = any(keyword in current_query for keyword in product_keywords)
+    
+    if is_product_question:
+        logger.info("[ANSWER] 상품 관련 질문 - 이전 맥락 무시하고 현재 질문에 집중")
+    else:
+        # 일반 FAQ 질문인 경우에만 이전 맥락 고려
+        messages = state.get("messages", [])
+        if messages and len(messages) > 1:
+            previous_context = ""
+            for msg in messages[:-1][-3:]:  # 최근 3개 메시지만 고려 (제한)
+                if hasattr(msg, 'content'):
+                    role = "사용자" if msg.__class__.__name__ == "HumanMessage" else "AI"
+                    previous_context += f"{role}: {msg.content[:50]}...\n"  # 더 짧게 제한
+            
+            if previous_context:
+                logger.info(f"[ANSWER] Considering previous context: {previous_context[:100]}...")
     
     if not response or not response.strip():
-        # 기본 응답 생성 (RAG 검색이 실패한 경우에만)
-        response = "죄송합니다. 해당 질문에 대한 정보를 찾을 수 없습니다. 다른 키워드로 다시 질문해주시거나 관련 부서에 문의해주세요."
-        logger.info("[ANSWER] Using default response")
+        # FAQ 답변 생성 시도
+        try:
+            slm = get_shared_slm()
+            response = create_simple_response(slm, state.get("query", ""), "faq_system")
+            response = clean_markdown_formatting(response)
+            logger.info("[ANSWER] Generated FAQ response")
+        except Exception as e:
+            logger.error(f"FAQ response generation failed: {e}")
+            # 기본 응답 생성 (RAG 검색이 실패한 경우에만)
+            response = "죄송합니다. 해당 질문에 대한 정보를 찾을 수 없습니다. 다른 키워드로 다시 질문해주시거나 관련 부서에 문의해주세요."
+            logger.info("[ANSWER] Using default response")
     
     # 마크다운 형식 제거
     response = clean_markdown_formatting(response)

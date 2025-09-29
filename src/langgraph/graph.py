@@ -152,7 +152,24 @@ def create_rag_workflow(
     # Context answer node - 맥락 기반 답변
     context_answer_with_slm = partial(context_answer_node, slm=slm)
     workflow.add_node(CONTEXT_ANSWER, context_answer_with_slm)
-    workflow.add_edge(CONTEXT_ANSWER, SUPERVISOR)  # 맥락 기반 답변은 supervisor_router로 라우팅
+    
+    # Context answer에서 조건부 라우팅 (검색 필요시 RAG/Product, 아니면 ANSWER)
+    def context_answer_router(state: RAGState) -> str:
+        """Context answer에서 조건부 라우팅"""
+        if state.get("redirect_to_rag"):
+            # RAG 검색이 필요한 경우
+            if state.get("product_name"):
+                return "product_extraction"  # 상품 검색
+            else:
+                return "rag_search"  # 일반 RAG 검색
+        else:
+            return "answer"  # 맥락 기반 답변 완료
+    
+    workflow.add_conditional_edges(
+        CONTEXT_ANSWER,
+        context_answer_router,
+        ["answer", "rag_search", "product_extraction"]
+    )
     
     # Answer node - final response generation
     workflow.add_node(ANSWER, answer_node)

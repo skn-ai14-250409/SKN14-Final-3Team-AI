@@ -155,7 +155,6 @@ class RAGAgent:
             
             # 워크플로우 실행 완료
             logger.info("[WORKFLOW] Execution completed successfully")
-            logger.info(f"[WORKFLOW] Result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
             
             # Extract response message for presentation
             response_message = result.get("response", "") if isinstance(result, dict) else ""
