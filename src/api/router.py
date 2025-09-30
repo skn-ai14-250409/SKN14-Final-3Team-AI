@@ -1,4 +1,4 @@
-from typing import Literal, List, Optional, Dict
+from typing import Literal, List, Optional, Dict, Any
 import logging
 import anyio
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -43,6 +43,7 @@ class IntentRoutingInput(BaseModel):
 class LangGraphRAGInput(BaseModel):
     prompt: str
     session_id: Optional[str] = None  # 세션 ID (선택사항)
+    chat_history: Optional[List[Dict[str, Any]]] = None  # Django에서 전달받은 대화 히스토리
 
 # 폴더 업로드 요청 모델
 class IngestFolderReq(BaseModel):
@@ -220,17 +221,37 @@ async def langgraph_rag(input: LangGraphRAGInput):
     
     try:
         import time
+        import asyncio
         start_time = time.time()
         
+        # 타임아웃 설정 (45초로 단축)
         workflow = get_langgraph_workflow()
-        result = workflow.run_workflow(input.prompt, input.session_id)
+        
+        # Django에서 전달받은 chat_history 활용
+        chat_history = getattr(input, 'chat_history', None)
+        if chat_history:
+            logger.info(f"[API] Using Django chat history: {len(chat_history)} messages")
+            # chat_history를 메시지 형태로 변환하여 전달
+            result = await asyncio.wait_for(
+                asyncio.to_thread(workflow.chat, input.prompt, input.session_id, False, "ko", chat_history),
+                timeout=180.0  # 타임아웃 연장 (3분)
+            )
+        else:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(workflow.run_workflow, input.prompt, input.session_id),
+                timeout=120.0  # 타임아웃 연장 (2분)
+            )
         
         end_time = time.time()
         response_time = end_time - start_time
         
         # 응답 완료 로깅
         session_title = result.get("initial_topic_summary", "") if isinstance(result, dict) else ""
+        execution_path = result.get("execution_path", []) if isinstance(result, dict) else []
+        path_str = " -> ".join(execution_path) if execution_path else "Unknown"
         logger.info(f"[API] Response time: {response_time:.2f}s | Title: '{session_title}'")
+        logger.info(f"[API] Workflow path: {path_str}")
+        logger.info("=" * 70)
         
         # 세션 정보에 session_title 추가 (안전한 처리)
         session_info = result.get("session_info", {}) if isinstance(result, dict) else {}
@@ -266,6 +287,27 @@ async def langgraph_rag(input: LangGraphRAGInput):
         from fastapi.responses import JSONResponse
         return JSONResponse(
             content=response_data.dict(),
+            media_type="application/json; charset=utf-8"
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"[LANGGRAPH RAG] Request timeout (60s)")
+        error_response = LangGraphRAGResponse(
+            status=STATUS_FAIL,
+            response="요청 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.",
+            sources=[],
+            category="timeout",
+            product_name="",
+            session_info={},
+            initial_intent="",
+            initial_topic_summary="",
+            conversation_mode="timeout",
+            current_topic="",
+            active_product=""
+        )
+        
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content=error_response.dict(),
             media_type="application/json; charset=utf-8"
         )
     except Exception as e:
@@ -617,3 +659,15 @@ async def query_rag_by_folder(input: QueryRagInput, main_category: str, sub_cate
             response=f"폴더별 검색 중 오류가 발생했습니다: {str(e)}",
             sources=[]
         )
+
+
+# Django 호환 엔드포인트 추가
+@router.post("/kb_bank/chatbot/api/chat/", response_model=LangGraphRAGResponse)
+async def django_chat_api(input: LangGraphRAGInput):
+    """
+    Django 호환 채팅 API 엔드포인트
+    """
+    logger.info(f"[DJANGO API] Query: '{input.prompt[:50]}...' | Session: {input.session_id}")
+    
+    # 기존 langgraph_rag 함수와 동일한 로직 사용
+    return await langgraph_rag(input)

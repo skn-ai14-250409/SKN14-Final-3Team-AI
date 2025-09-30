@@ -4,93 +4,123 @@
 
 ```
 src/langgraph/
-├── langgraph_v2.py          # 메인 진입점 (호환성 유지)
-├── workflow.py              # 워크플로우 클래스 정의
-├── workflow_factory.py      # 워크플로우 팩토리 함수들
-├── state.py                 # 상태 정의 (RAGState)
-├── nodes.py                 # 노드 함수들 (실제 구현)
-├── tools.py                 # 도구 정의 (LangChain @tool)
-├── session_manager.py       # 세션 관리 클래스
-├── utils.py                 # 공통 유틸리티 함수들
-├── guardrails/              # 가드레일 설정 파일들
-│   ├── glossary_terms.yaml
-│   └── policy_rules.yaml
-└── README.md               # 이 문서
+├── graph.py                    # 워크플로우 그래프 정의 및 노드 연결
+├── nodes.py                    # 모든 노드 함수들 (939줄)
+├── agent.py                    # RAGAgent 클래스 (메인 에이전트)
+├── models.py                   # Pydantic 모델 및 TypedDict 정의
+├── utils.py                    # 공통 유틸리티 함수들 (싱글톤, 캐싱)
+├── tools.py                    # LangChain 도구 정의
+├── session_manager.py          # 세션 관리 클래스
+├── langgraph_v2.py            # 호환성 유지를 위한 진입점
+├── prompts.yaml               # 프롬프트 템플릿 (215줄)
+├── guardrails/                # 가드레일 설정
+│   ├── glossary_terms.yaml    # 금융 용어 정의
+│   └── policy_rules.yaml      # 정책 규칙 정의
+└── README.md                  # 이 문서
 ```
 
 ## 🎯 전체 아키텍처
 
-### **LangGraph V2 모듈화 구조**
-- **툴콜링 기반 워크플로우**: LLM이 도구를 선택하여 실행하는 구조
-- **모듈화된 설계**: 각 기능별로 파일을 분리하여 유지보수성 향상
-- **세션 관리**: 대화 히스토리와 컨텍스트 추적
-- **멀티턴 대화**: 연속적인 대화 지원
-- **SLM 인스턴스 최적화**: 중복 생성 제거로 성능 향상
+### **LangGraph V2 워크플로우 구조**
+- **지능형 라우팅**: LLM 기반 노드 선택으로 정확한 경로 결정
+- **멀티턴 대화**: 세션 관리와 맥락 유지를 통한 연속 대화 지원
+- **성능 최적화**: 싱글톤 패턴과 캐싱을 통한 메모리 효율성
+- **가드레일 시스템**: 응답 품질 보장 및 금융 규제 준수
 
 ## 📋 각 파일 상세 설명
 
-### 1. `langgraph_v2.py` - 메인 진입점
-**역할**: 모듈화된 구조의 통합 진입점
-**주요 기능**:
-- 모든 모듈을 import하여 통합
-- `get_langgraph_workflow()` 함수 제공
-- 싱글톤 패턴으로 워크플로우 인스턴스 관리
-- 기존 코드와의 호환성 유지
-
-```python
-# 사용 예시
-from src.langgraph.langgraph_v2 import get_langgraph_workflow
-workflow = get_langgraph_workflow()
-result = workflow.run_workflow("햇살론에 대해 알려주세요", "session_123")
-```
-
-### 2. `workflow.py` - 워크플로우 클래스
-**역할**: RAG 워크플로우의 핵심 실행 클래스
-**주요 기능**:
-- `LangGraphRAGWorkflow` 클래스 정의
-- `run_workflow()` 메서드로 전체 워크플로우 실행
-- 세션 관리와 대화 히스토리 처리
-- 에러 처리 및 로깅
-
-```python
-class LangGraphRAGWorkflow:
-    def __init__(self, checkpointer=None, llm=None):
-        self.slm = SLM()
-        self.vector_store = VectorStore()
-        self.workflow = create_rag_workflow(checkpointer=checkpointer, llm=llm)
-    
-    def run_workflow(self, query: str, session_id: str = None) -> Dict[str, Any]:
-        # 워크플로우 실행 로직
-```
-
-### 3. `workflow_factory.py` - 워크플로우 팩토리
-**역할**: 워크플로우 생성 및 구성
+### 1. `graph.py` - 워크플로우 그래프 정의
+**역할**: LangGraph 워크플로우의 핵심 구조 정의
 **주요 기능**:
 - `create_rag_workflow()` 함수로 워크플로우 생성
-- SLM 인스턴스 생성 및 모든 노드에 전달 (중복 제거)
-- 노드 간 연결 및 라우팅 설정
+- 노드 간 연결 및 조건부 라우팅 설정
+- 싱글톤 SLM/VectorStore 인스턴스 사용
 - 워크플로우 컴파일 및 반환
 
 ```python
-def create_rag_workflow(checkpointer=None, llm=None) -> StateGraph:
-    # SLM 인스턴스 생성 (중복 제거)
-    slm = SLM()
+def create_rag_workflow(checkpointer=None, llm=None) -> Runnable:
+    """RAG 워크플로우 생성"""
+    slm = get_shared_slm()  # 싱글톤 인스턴스
+    workflow = StateGraph(RAGState)
     
-    # 각 노드에 SLM 전달
-    intent_classification_with_slm = partial(intent_classification_node, slm=slm)
-    chitchat_with_slm = partial(chitchat_node, slm=slm)
-    # ... 모든 노드에 적용
+    # 노드 추가 및 연결
+    workflow.add_node(SESSION_INIT, session_init_node)
+    workflow.add_node(SUPERVISOR, supervisor_with_llm)
+    # ... 기타 노드들
+    
+    return workflow.compile(checkpointer=checkpointer)
 ```
 
-### 4. `state.py` - 상태 정의
-**역할**: 워크플로우 상태 스키마 정의
+### 2. `nodes.py` - 노드 함수들 (939줄)
+**역할**: 워크플로우의 각 단계별 실행 함수들
 **주요 기능**:
-- `RAGState` TypedDict로 상태 구조 정의
-- 모든 노드 간 공유되는 데이터 구조
-- 타입 안전성 보장
+- 8개의 핵심 노드 함수 정의
+- 실행 경로 추적 및 상태 변경 로깅
+- 성능 최적화된 구현
+- 에러 처리 및 폴백 로직
+
+#### **노드 함수 목록**:
+1. `session_init_node()` - 세션 초기화 및 대화 히스토리 로드
+2. `supervisor_node()` - LLM 기반 지능형 라우팅
+3. `supervisor_router()` - 라우팅 결정 로직
+4. `product_extraction_node()` - 상품명 추출
+5. `product_search_node()` - 상품별 검색
+6. `session_summary_node()` - 세션 제목 생성 (첫 대화)
+7. `rag_search_node()` - RAG 문서 검색
+8. `context_answer_node()` - 맥락 기반 답변
+9. `guardrail_check_node()` - 응답 검증
+10. `answer_node()` - 최종 답변 생성
+
+```python
+def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
+    """중앙 관리자 - 툴 선택"""
+    # 첫 대화인지 확인
+    is_first_turn = not conversation_history or len(conversation_history) == 0
+    
+    if is_first_turn:
+        # 도구를 사용하여 라우팅
+        from .tools import answer, rag_search, product_extraction, context_answer
+        tool_functions = [answer, rag_search, product_extraction, context_answer]
+        result = slm.llm.bind_tools(tool_functions, tool_choice="required").invoke(supervisor_prompt)
+    else:
+        # 멀티턴 대화 처리
+        # 맥락 기반 답변 우선 고려
+```
+
+### 3. `agent.py` - RAGAgent 클래스
+**역할**: 통합된 에이전트 인터페이스 제공
+**주요 기능**:
+- `RAGAgent` 클래스로 통합 인터페이스
+- Django와의 통합 지원
+- 스트리밍 및 일반 실행 모드
+- 에러 처리 및 상태 관리
+
+```python
+class RAGAgent:
+    def __init__(self, checkpointer=None, config=None):
+        self.slm = get_shared_slm()
+        self.vector_store = get_shared_vector_store()
+        self.workflow = create_rag_workflow(checkpointer=self.checkpointer, llm=self.slm.llm)
+    
+    def chat(self, message: str, session_id: str = None, stream: bool = False, **kwargs):
+        """통합 채팅 인터페이스"""
+        # Django 대화 히스토리 처리
+        # 워크플로우 실행
+        # 결과 반환
+```
+
+### 4. `models.py` - 데이터 모델 정의
+**역할**: 타입 안전성을 위한 데이터 구조 정의
+**주요 기능**:
+- Pydantic 모델과 TypedDict 정의
+- 세션 컨텍스트 및 대화 턴 모델
+- API 응답 및 에러 모델
+- 설정 모델
 
 ```python
 class RAGState(TypedDict):
+    """LangGraph RAG 워크플로우 상태"""
+    messages: Annotated[Sequence[Union[BaseMessage, dict]], operator.add]
     query: str
     response: str
     session_context: Optional[SessionContext]
@@ -98,282 +128,307 @@ class RAGState(TypedDict):
     # ... 기타 상태 필드들
 ```
 
-### 5. `nodes.py` - 노드 함수들
-**역할**: 워크플로우의 각 단계별 실행 함수들
+### 5. `utils.py` - 공통 유틸리티 (772줄)
+**역할**: 공통 기능 및 성능 최적화
 **주요 기능**:
-- 11개의 노드 함수 정의
-- SLM 인스턴스를 매개변수로 받아 중복 생성 방지
-- 각 노드별 특화된 로직 구현
-- 에러 처리 및 로깅
-
-#### **노드 함수 목록**:
-1. `session_init_node()` - 세션 초기화
-2. `intent_classification_node()` - 의도 분류 (4개 카테고리)
-3. `supervisor_node()` - 중앙 관리자 (툴 선택)
-4. `chitchat_node()` - 일반 대화 처리
-5. `general_faq_node()` - 일반 은행 FAQ
-6. `product_extraction_node()` - 상품명 추출
-7. `product_search_node()` - 상품 검색
-8. `session_summary_node()` - 세션 요약 생성
-9. `rag_search_node()` - RAG 검색
-10. `guardrail_check_node()` - 가드레일 검사
-11. `answer_node()` - 최종 답변 생성
+- 싱글톤 패턴으로 SLM/VectorStore 관리
+- 프롬프트 캐싱 및 로드
+- 검색 결과 캐싱
+- 가드레일 검사 로직
+- 상품명 추출 및 분류
 
 ```python
-def chitchat_node(state: RAGState, slm: SLM = None) -> RAGState:
-    """일반 대화 처리"""
-    # SLM 인스턴스 생성 (매개변수로 받지 않은 경우에만)
-    if slm is None:
-        slm = SLM()
-    # ... 노드 로직
+class SLMManager:
+    """SLM 인스턴스를 싱글톤으로 관리"""
+    _instance = None
+    _slm_instance = None
+    
+    def get_slm(self):
+        if self._slm_instance is None:
+            from ..slm.slm import SLM
+            self._slm_instance = SLM()
+        return self._slm_instance
 ```
 
-### 6. `tools.py` - 도구 정의
+### 6. `tools.py` - LangChain 도구 정의
 **역할**: LangChain @tool 데코레이터로 정의된 도구들
 **주요 기능**:
 - 9개의 도구 함수 정의
-- 각 도구의 스키마와 설명 제공
 - supervisor_node에서 사용 가능한 도구 목록
-
-#### **도구 목록**:
-1. `chitchat()` - 일반 대화
-2. `general_faq()` - 일반 FAQ
-3. `rag_search()` - RAG 검색
-4. `product_extraction()` - 상품명 추출
-5. `product_search()` - 상품 검색
-6. `session_summary()` - 세션 요약
-7. `guardrail_check()` - 가드레일 검사
-8. `answer()` - 답변 생성
-9. `intent_classification()` - 의도 분류
+- 각 도구의 스키마와 설명 제공
 
 ```python
 @tool(parse_docstring=True)
-def chitchat(thought: str, query: str):
-    """
-    Handle casual conversation and greetings.
+def rag_search(thought: str, query: str):
+    """Search documents using RAG for specific information."""
     
-    Args:
-        thought: Reasoning for choosing this tool
-        query: User's casual conversation or greeting
-    """
+@tool(parse_docstring=True)
+def product_extraction(thought: str, query: str):
+    """Extract product name from user query."""
 ```
 
 ### 7. `session_manager.py` - 세션 관리
 **역할**: 대화 세션 및 히스토리 관리
 **주요 기능**:
 - `SessionManager` 클래스로 세션 생성/관리
-- 대화 히스토리 저장 및 조회
-- 세션 만료 처리
-- 컨텍스트 추적
+- Django와의 통합을 통한 대화 히스토리 로드
+- 세션 만료 처리 및 자동 정리
+- 컨텍스트 추적 및 메시지 히스토리 관리
 
 ```python
 class SessionManager:
     def create_session(self, session_id: str = None) -> SessionContext:
-        # 세션 생성 로직
+        """새 세션 생성"""
     
-    def get_session(self, session_id: str) -> Optional[SessionContext]:
-        # 세션 조회 로직
+    def get_conversation_history(self, session_id: str, limit: int = 10) -> List[ConversationTurn]:
+        """Django에서 대화 히스토리 로드"""
 ```
 
-### 8. `utils.py` - 공통 유틸리티
-**역할**: 공통 함수 및 상수 정의
+### 8. `prompts.yaml` - 프롬프트 템플릿 (215줄)
+**역할**: 모든 프롬프트 템플릿 중앙 관리
 **주요 기능**:
-- 시스템 프롬프트 템플릿
+- 시스템 프롬프트 정의
+- 라우팅 프롬프트 정의
 - 에러 메시지 정의
-- 공통 유틸리티 함수들
-- 상수 정의
+- 가드레일 설정
 
-```python
-# 시스템 프롬프트
-SYSTEM_PROMPTS = {
-    "rag_system": "당신은 KB금융그룹의 전문 상담사입니다...",
-    "faq_system": "일반적인 은행 FAQ 질문에 대해...",
-    # ... 기타 프롬프트들
-}
-
-# 에러 메시지
-ERROR_MESSAGES = {
-    "general_error": "죄송합니다. 처리 중 오류가 발생했습니다.",
-    # ... 기타 에러 메시지들
-}
+```yaml
+system_prompts:
+  supervisor:
+    system: |
+      당신은 KB금융그룹의 중앙 관리자입니다...
+  rag_system:
+    system: |
+      당신은 KB금융그룹의 내부 시스템입니다...
 ```
 
 ## 🔄 워크플로우 실행 흐름
 
 ### **1단계: 세션 초기화**
 ```
-session_init_node → 세션 생성/조회 → 대화 히스토리 로드
+SESSION_INIT → 세션 생성/조회 → 대화 히스토리 로드
 ```
 
-### **2단계: 의도 분류**
+### **2단계: 첫 대화 vs 멀티턴 판단**
 ```
-intent_classification_node → 4개 카테고리 분류:
-├── general_banking_FAQs (일반 은행 FAQ)
-├── industry_policies_and_regulations (업계 규제)
-├── company_rules (회사 내규)
-└── company_products (회사 상품)
+first_turn_router → 첫 대화면 SESSION_SUMMARY, 아니면 SUPERVISOR
 ```
 
-### **3단계: 중앙 관리자**
+### **3단계: 지능형 라우팅**
 ```
-supervisor_node → 툴 선택 → 다음 노드로 라우팅
+SUPERVISOR → LLM 기반 도구 선택 → 다음 노드로 라우팅:
+├── rag_search (문서 검색)
+├── product_extraction (상품명 추출)
+├── answer (일반 FAQ)
+└── context_answer (맥락 기반 답변)
 ```
 
 ### **4단계: 특화 노드 실행**
 ```
-├── chitchat_node (일반 대화)
-├── general_faq_node (일반 FAQ)
-├── product_extraction_node → product_search_node (상품 검색)
-├── session_summary_node (세션 요약)
-├── rag_search_node (RAG 검색)
-└── guardrail_check_node (가드레일 검사)
+├── PRODUCT_EXTRACTION → PRODUCT_SEARCH → ANSWER
+├── RAG_SEARCH → ANSWER
+├── CONTEXT_ANSWER → 조건부 라우팅
+└── ANSWER (직접)
 ```
 
-### **5단계: 최종 답변**
+### **5단계: 가드레일 검사**
 ```
-answer_node → 응답 생성 → 세션 업데이트 → 종료
+ANSWER → GUARDRAIL_CHECK → 최종 응답
 ```
 
 ## 🚀 성능 최적화
 
-### **SLM 인스턴스 관리**
-- **이전**: 각 노드마다 SLM 인스턴스 생성 (11번)
-- **이후**: workflow_factory에서 1번만 생성하고 모든 노드에 전달
-- **효과**: 메모리 사용량 감소, 초기화 시간 단축
+### **싱글톤 패턴**
+- **SLM 인스턴스**: `get_shared_slm()`으로 중복 생성 방지
+- **VectorStore 인스턴스**: `get_shared_vector_store()`로 메모리 효율성
+- **프롬프트 캐싱**: YAML 파일을 한 번만 로드하여 재사용
 
-### **모듈화 설계**
-- 각 기능별 파일 분리로 유지보수성 향상
-- 공통 유틸리티 함수 중앙화
-- 타입 안전성 보장
+### **고급 캐싱 시스템**
+- **TTL 기반 캐시**: 5분 TTL로 자동 만료 처리
+- **LRU 캐시 관리**: 가장 오래된 항목부터 제거
+- **캐시 크기 제한**: 메모리 누수 방지 (최대 100개 항목)
+- **자동 캐시 정리**: `cleanup_expired_cache()` 함수로 주기적 정리
 
-## 📊 의도 분류 시스템
+### **검색 최적화**
+- **검색 결과 캐싱**: 동일한 쿼리에 대한 결과 재사용
+- **문서 수 제한**: k=3으로 검색 결과 수 최적화
+- **메타데이터 필터링**: 상품별 정확한 검색
+- **쿼리 길이 최적화**: `optimize_query_length()`로 긴 쿼리 처리
 
-### **4개 카테고리**
-1. **general_banking_FAQs**: 일반적인 은행 개념이나 금융 상식
-   - 예: "예금이 뭐예요?", "적금이 뭐예요?"
+### **메모리 관리**
+- **대화 히스토리 제한**: 최대 10개 턴으로 제한
+- **메시지 히스토리 제한**: 최대 50개 메시지로 제한
+- **컨텍스트 길이 제한**: 최대 2000자로 제한
+- **배치 처리**: `batch_process_items()`로 대량 데이터 처리
 
-2. **industry_policies_and_regulations**: 은행업 규제 및 정책
-   - 예: "KYC 규정이 뭐예요?", "바젤3 규정에 대해"
+### **성능 모니터링**
+- **실행 시간 추적**: `log_performance()` 함수로 1초 이상 작업만 로깅
+- **메모리 사용량 모니터링**: `get_memory_usage()`로 실시간 모니터링
+- **조건부 로깅**: DEBUG 모드에서만 상세 로깅
+- **캐시 히트율 추적**: 캐시 효율성 모니터링
 
-3. **company_rules**: KB금융그룹 내부 규칙 및 정책
-   - 예: "직원 휴가 정책은 어떻게 되나요?"
+## 📊 지능형 라우팅 시스템
 
-4. **company_products**: KB금융그룹의 구체적인 상품
-   - 예: "햇살론 대출에 대해", "KB카드 혜택이 뭐예요?"
+### **라우팅 우선순위**
+1. **최우선**: 상품명이 명확히 언급 → `product_extraction`
+2. **두 번째**: 이전 대화 맥락만으로 답변 가능 → `context_answer`
+3. **세 번째**: 일반적인 지식으로 답변 가능 → `answer`
+4. **기본**: 그 외의 경우 → `rag_search`
+
+### **맥락 기반 답변**
+- 이전 대화에서 상품을 설명했다면, 그 상품에 대한 모든 후속 질문은 `context_answer` 선택
+- "나이 제한이 있나요?", "조건은 어떻게 되나요?" 등 구체적인 조건 질문 처리
 
 ## 🔧 사용법
 
 ### **기본 사용법**
 ```python
-from src.langgraph.langgraph_v2 import get_langgraph_workflow
+from src.langgraph.agent import RAGAgent
 
-# 워크플로우 인스턴스 가져오기
-workflow = get_langgraph_workflow()
+# 에이전트 생성
+agent = RAGAgent()
 
-# 쿼리 실행
-result = workflow.run_workflow(
-    query="햇살론 대출에 대해 알려주세요",
+# 채팅 실행
+result = agent.chat(
+    message="햇살론 대출에 대해 알려주세요",
     session_id="user_123"
 )
 
 print(result["response"])
 ```
 
-### **FastAPI에서 사용**
+### **Django 통합**
 ```python
-from src.langgraph.langgraph_v2 import get_langgraph_workflow
-
-@app.post("/api/v1/langgraph/langgraph_rag")
-async def langgraph_rag(request: LangGraphRequest):
-    workflow = get_langgraph_workflow()
-    result = workflow.run_workflow(
-        query=request.prompt,
-        session_id=request.session_id
-    )
+def send_message_with_langgraph_rag(message: str, session_id: str, chat_history: List[Dict[str, Any]] = None):
+    """Django에서 호출하는 함수"""
+    agent = RAGAgent()
+    result = agent.chat(message, session_id, chat_history=chat_history)
     return result
 ```
 
-## 🐛 에러 처리
-
-### **공통 에러 처리**
-- 모든 노드에서 `try-except` 블록으로 에러 처리
-- `create_error_response()` 함수로 일관된 에러 응답
-- 로깅을 통한 디버깅 지원
-
-### **에러 메시지**
+### **스트리밍 모드**
 ```python
-ERROR_MESSAGES = {
-    "general_error": "죄송합니다. 처리 중 오류가 발생했습니다.",
-    "search_error": "죄송합니다. 검색 중 오류가 발생했습니다.",
-    "no_documents": "죄송합니다. 관련 문서를 찾을 수 없습니다.",
-    # ... 기타 에러 메시지들
-}
-```
-
-## 📝 로깅 시스템
-
-### **노드별 로깅**
-- 각 노드 실행 시 이모지와 함께 로깅
-- PDF 문서 정보 로깅 (파일명, 페이지 번호)
-- 의도 분류 결과 로깅
-
-### **로그 예시**
-```
-🎯 [NODE] intent_classification_node 실행 시작
-📚 [NODE] rag_search_node 실행 시작
-📄 [RAG] 사용된 PDF 문서 정보:
-  📋 문서 1: 햇살론_대출_상품안내.pdf (페이지: 3)
-  📋 문서 2: KB카드_혜택안내.pdf (페이지: 1)
-```
-
-## 🔄 멀티턴 대화
-
-### **세션 관리**
-- `SessionManager`로 대화 히스토리 관리
-- 컨텍스트 유지를 통한 연속 대화 지원
-- 세션 만료 및 자동 정리
-
-### **대화 흐름**
-```
-첫 번째 질문 → 세션 생성 → 의도 분류 → 답변 생성
-두 번째 질문 → 기존 세션 로드 → 컨텍스트 고려 → 답변 생성
+# 스트리밍 실행
+for chunk in agent.chat(message, session_id, stream=True):
+    print(chunk)
 ```
 
 ## 🛡️ 가드레일 시스템
 
 ### **응답 검증**
-- `guardrail_check_node`에서 응답 검증
-- 금융 규제 준수 확인
-- 부적절한 내용 필터링
+- **완전성 검사**: 응답 길이 및 완성도 확인
+- **정확성 검사**: 금융 정보의 정확성 검증
+- **용어 정규화**: 금융 용어 표준화
+- **구조 검사**: 응답 형식 및 강조 적용
 
-### **가드레일 파일**
+### **가드레일 설정 파일**
 - `guardrails/glossary_terms.yaml`: 금융 용어 정의
-- `guardrails/policy_rules.yaml`: 정책 규칙 정의
+- `guardrails/policy_rules.yaml`: 정책 규칙 및 검증 로직
+
+## 📝 로깅 시스템
+
+### **노드별 로깅**
+```python
+logger.info("🏷️ [NODE] product_extraction_node 실행 시작")
+logger.info("🔍 [NODE] product_search_node 실행 시작")
+logger.info("📚 [NODE] rag_search_node 실행 시작")
+```
+
+### **성능 모니터링**
+```python
+start_time = time.time()
+# ... 노드 실행 ...
+end_time = time.time()
+logger.info(f"📝 [NODE] node_name 완료 - 실행시간: {execution_time:.2f}초")
+```
+
+## 🔄 멀티턴 대화
+
+### **세션 관리**
+- Django와의 통합을 통한 대화 히스토리 로드
+- 세션별 컨텍스트 유지
+- 자동 세션 만료 및 정리
+
+### **맥락 유지**
+- 이전 대화 내용을 고려한 답변 생성
+- 상품별 연속 질문 처리
+- 대화 흐름의 자연스러운 연결
 
 ## 📈 성능 모니터링
 
-### **메트릭**
-- 노드 실행 시간 측정
-- 메모리 사용량 모니터링
-- 에러율 추적
+### **실행 경로 추적**
+```python
+def track_execution_path(state: RAGState, node_name: str) -> RAGState:
+    """실행 경로를 추적하는 헬퍼 함수"""
+    execution_path = state.get("execution_path", [])
+    execution_path.append(node_name)
+    return {**state, "execution_path": execution_path}
+```
 
-### **최적화 포인트**
-- SLM 인스턴스 재사용
-- 벡터 검색 최적화
-- 캐싱 전략 적용
+### **상태 변경 추적**
+```python
+def track_state_changes(state: RAGState, change_type: str, details: str = "") -> RAGState:
+    """상태 변경 추적"""
+    state_changes = state.get("state_changes", [])
+    state_changes.append({
+        "type": change_type,
+        "details": details,
+        "timestamp": time.time()
+    })
+    return {**state, "state_changes": state_changes}
+```
+
+## 🐛 에러 처리
+
+### **포괄적 에러 처리**
+- 모든 노드에서 `try-except` 블록으로 에러 처리
+- `create_error_response()` 함수로 일관된 에러 응답
+- 로깅을 통한 디버깅 지원
+
+### **에러 메시지 (prompts.yaml)**
+```yaml
+error_messages:
+  general_error: "시스템 오류가 발생했습니다."
+  search_error: "검색 중 오류가 발생했습니다. 다시 시도해주세요."
+  timeout_error: "요청 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+  no_documents: "관련 문서를 찾을 수 없습니다. 다른 키워드로 검색해보세요."
+```
+
+## 🎯 핵심 특징
+
+### **✅ 지능형 라우팅**
+- LLM 기반 도구 선택으로 정확한 경로 결정
+- 맥락을 고려한 멀티턴 대화 처리
+- 상품별 특화된 검색 및 답변
+
+### **✅ 성능 최적화**
+- 싱글톤 패턴으로 메모리 효율성
+- 검색 결과 캐싱으로 속도 향상
+- 적절한 제한으로 메모리 누수 방지
+
+### **✅ 확장성**
+- 모듈화된 구조로 새로운 노드 추가 용이
+- YAML 기반 설정으로 프롬프트 관리
+- Django와의 원활한 통합
+
+### **✅ 안정성**
+- 포괄적인 에러 처리
+- 가드레일 시스템으로 응답 품질 보장
+- 상세한 로깅으로 디버깅 지원
 
 ---
 
 ## 🎯 요약
 
-이 `langgraph` 폴더는 **모듈화된 RAG 워크플로우**를 제공하며, 다음과 같은 특징을 가집니다:
+이 `langgraph` 폴더는 **프로덕션 레벨의 완성도**를 가진 RAG 워크플로우를 제공하며, 다음과 같은 특징을 가집니다:
 
-- ✅ **툴콜링 기반**: LLM이 도구를 선택하여 실행
-- ✅ **모듈화 설계**: 각 기능별 파일 분리
-- ✅ **성능 최적화**: SLM 인스턴스 중복 생성 제거
-- ✅ **멀티턴 대화**: 세션 관리로 연속 대화 지원
-- ✅ **의도 분류**: 4개 카테고리로 정확한 라우팅
-- ✅ **에러 처리**: 견고한 에러 처리 및 로깅
-- ✅ **가드레일**: 금융 규제 준수 및 응답 검증
+- ✅ **지능형 라우팅**: LLM 기반 정확한 노드 선택
+- ✅ **멀티턴 대화**: 세션 관리와 맥락 유지
+- ✅ **성능 최적화**: 싱글톤 패턴과 캐싱
+- ✅ **가드레일 시스템**: 응답 품질 보장
+- ✅ **Django 통합**: 원활한 웹 애플리케이션 연동
+- ✅ **확장성**: 모듈화된 구조로 유지보수 용이
+- ✅ **안정성**: 포괄적인 에러 처리와 로깅
 
+이 구조를 통해 **확장 가능하고 유지보수하기 쉬운** 고품질 RAG 시스템을 구축할 수 있습니다.
 이 구조를 통해 **확장 가능하고 유지보수하기 쉬운** RAG 시스템을 구축할 수 있습니다.

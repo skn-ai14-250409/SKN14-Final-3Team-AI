@@ -16,7 +16,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from .models import RAGState, APIResponse, ErrorResponse, WorkflowConfig, SessionConfig
 from .graph import create_rag_workflow
 from .session_manager import session_manager
-from .utils import generate_session_title
+from .utils import generate_session_title, trim_message_history, get_shared_slm, get_shared_vector_store
 from ..slm.slm import SLM
 from ..rag.vector_store import VectorStore
 
@@ -41,8 +41,9 @@ class RAGAgent:
         """
         self.checkpointer = checkpointer or MemorySaver()
         self.config = config or WorkflowConfig()
-        self.slm = SLM()
-        self.vector_store = VectorStore()
+        # 싱글톤 인스턴스 사용으로 메모리 효율성 증대
+        self.slm = get_shared_slm()
+        self.vector_store = get_shared_vector_store()
         self.workflow = create_rag_workflow(
             checkpointer=self.checkpointer, 
             llm=self.slm.llm
@@ -55,6 +56,7 @@ class RAGAgent:
         session_id: Optional[str] = None,
         stream: bool = False,
         language: str = "ko",
+        chat_history: List[Dict[str, Any]] = None,
         **kwargs
     ) -> Dict[str, Any] | Iterator[Dict[str, Any]]:
         """
@@ -65,6 +67,7 @@ class RAGAgent:
             session_id: Session identifier for conversation persistence  
             stream: Whether to stream response chunks
             language: Language code for response (default: "ko")
+            chat_history: Django에서 전달받은 대화 히스토리
             **kwargs: Additional configuration options
             
         Returns:
@@ -80,18 +83,38 @@ class RAGAgent:
                 }
             }
             
+            # Django에서 전달받은 대화 히스토리를 메시지로 변환 (성능 최적화)
+            messages = []
+            if chat_history:
+                # 최근 10개 메시지만 처리 (성능 최적화)
+                recent_history = chat_history[-10:] if len(chat_history) > 10 else chat_history
+                logger.info(f"[AGENT] Processing {len(recent_history)} messages from Django chat history (total: {len(chat_history)})")
+                
+                for msg in recent_history:
+                    if msg.get('role') == 'user':
+                        messages.append(HumanMessage(content=msg.get('content', '')))
+                    elif msg.get('role') == 'assistant':
+                        messages.append(AIMessage(content=msg.get('content', '')))
+                logger.info(f"[AGENT] Converted {len(messages)} messages from Django history")
+            
+            # 현재 메시지 추가
+            messages.append(HumanMessage(content=message))
+            
             # Prepare input data
             input_data = {
                 "query": message,
                 "session_id": session_id,
                 "language": language,
-                "messages": [HumanMessage(content=message)],
+                "messages": messages,  # Django 히스토리 + 현재 메시지
+                "conversation_history": chat_history or [],  # Django 히스토리 원본
                 # Initialize state flags
                 "ready_to_answer": False,
                 "needs_clarification": False,
                 "query_complete": False,
                 "n_tool_calling": 0,
-                "retry_count": 0
+                "retry_count": 0,
+                # Initialize execution path tracking
+                "execution_path": []
             }
             
             logger.info(f"Processing chat request: session={session_id}, stream={stream}")
@@ -127,6 +150,7 @@ class RAGAgent:
         """
         try:
             logger.debug("Executing workflow with interrupt handling")
+            logger.info("[WORKFLOW] Starting workflow execution...")
             result = self.workflow.invoke(input_data, config=config)
             
             # 워크플로우 실행 완료
@@ -221,20 +245,23 @@ class RAGAgent:
     
     def get_conversation_history(self, session_id: str) -> List[Any]:
         """
-        Retrieve conversation history for given session
+        Retrieve conversation history for given session with memory limit
         
         Args:
             session_id: Session identifier for conversation
             
         Returns:
-            List of messages from conversation history
+            List of messages from conversation history (limited to prevent memory issues)
         """
         try:
             config = {"configurable": {"thread_id": session_id}}
             state = self.workflow.get_state(config)
             messages = state.values.get("messages", []) if state.values else []
-            logger.debug(f"Retrieved {len(messages)} messages for session {session_id}")
-            return messages
+            
+            # 메시지 히스토리 제한 적용
+            trimmed_messages = trim_message_history(messages)
+            logger.debug(f"Retrieved {len(trimmed_messages)} messages for session {session_id} (original: {len(messages)})")
+            return trimmed_messages
         except Exception as e:
             logger.error(f"Failed to get conversation history: {e}", exc_info=True)
             return []
@@ -269,6 +296,41 @@ class RAGAgent:
             Workflow execution result
         """
         return self.chat(query, session_id)
+    
+    def send_message_with_langgraph_rag(self, message: str, session_id: str, chat_history: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Django에서 호출하는 함수 - 대화 히스토리 지원
+        
+        Args:
+            message: 사용자 메시지
+            session_id: 세션 ID
+            chat_history: Django에서 전달받은 대화 히스토리
+            
+        Returns:
+            LangGraph 실행 결과
+        """
+        try:
+            result = self.chat(message, session_id, chat_history=chat_history)
+            
+            # Django에서 필요한 형태로 변환
+            return {
+                "response": result.get("response", ""),
+                "sources": result.get("sources", []),
+                "category": result.get("category", ""),
+                "product_name": result.get("product_name", ""),
+                "session_id": session_id,
+                "success": result.get("success", True)
+            }
+        except Exception as e:
+            logger.error(f"Django integration failed: {e}")
+            return {
+                "response": f"처리 중 오류가 발생했습니다: {str(e)}",
+                "sources": [],
+                "category": "",
+                "product_name": "",
+                "session_id": session_id,
+                "success": False
+            }
 
 
 # ========== Factory Functions ==========

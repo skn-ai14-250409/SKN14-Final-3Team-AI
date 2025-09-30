@@ -20,18 +20,17 @@ from langgraph.graph import START, END, StateGraph
 from .models import RAGState
 from .nodes import (
     session_init_node,
-    intent_classification_node,
     supervisor_node,
     supervisor_router,
-    general_faq_node,
     product_extraction_node,
     product_search_node,
     session_summary_node,
     rag_search_node,
+    context_answer_node,
     guardrail_check_node,
     answer_node
 )
-from ..slm.slm import SLM
+from .utils import get_shared_slm, get_shared_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +38,12 @@ logger = logging.getLogger(__name__)
 
 # Main workflow nodes
 SESSION_INIT = "session_init"
-INTENT_CLASSIFICATION = "intent_classification"
 SUPERVISOR = "supervisor"
-GENERAL_FAQ = "general_faq"
 PRODUCT_EXTRACTION = "product_extraction"
 PRODUCT_SEARCH = "product_search"
 SESSION_SUMMARY = "session_summary"
 RAG_SEARCH = "rag_search"
+CONTEXT_ANSWER = "context_answer"  # 맥락 기반 답변 노드
 GUARDRAIL_CHECK = "guardrail_check"
 ANSWER = "answer"
 
@@ -66,6 +64,16 @@ def start_router(state: RAGState) -> list[str]:
     """Initial routing - always go to session_init"""
     return [SESSION_INIT]
 
+def first_turn_router(state: RAGState) -> str:
+    """첫 대화인지 확인하여 라우팅"""
+    conversation_history = state.get("conversation_history", [])
+    is_first_turn = not conversation_history or len(conversation_history) == 0
+    
+    if is_first_turn:
+        return "session_summary"
+    else:
+        return "supervisor"
+
 
 
 
@@ -77,7 +85,7 @@ def create_rag_workflow(
 ) -> Runnable:
     """
     Create RAG workflow following the specified scenario:
-    SESSION_INIT -> INTENT_CLASSIFICATION -> SUPERVISOR -> SPECIALIZED_NODES -> ANSWER
+    SESSION_INIT -> SESSION_SUMMARY -> SUPERVISOR -> SPECIALIZED_NODES -> ANSWER
     
     Args:
         checkpointer: Checkpoint saver for conversation persistence
@@ -86,8 +94,8 @@ def create_rag_workflow(
     Returns:
         Compiled StateGraph workflow
     """
-    # SLM 인스턴스 생성 (중복 제거)
-    slm = SLM()
+    # 싱글톤 SLM 인스턴스 사용 (메모리 효율성)
+    slm = get_shared_slm()
     if not llm:
         llm = slm.llm
     
@@ -99,17 +107,10 @@ def create_rag_workflow(
     workflow.add_node(SESSION_INIT, session_init_node)
     workflow.add_edge(START, SESSION_INIT)
     
-    # Intent classification
-    intent_classification_with_slm = partial(intent_classification_node, slm=slm)
-    workflow.add_node(INTENT_CLASSIFICATION, intent_classification_with_slm)
-    workflow.add_edge(SESSION_INIT, INTENT_CLASSIFICATION)
-    
-    # Conditional routing after intent classification
-    # First turn: INTENT_CLASSIFICATION -> SESSION_SUMMARY
-    # Subsequent turns: INTENT_CLASSIFICATION -> SUPERVISOR
+    # SESSION_INIT 후 첫 대화인지 확인하여 라우팅
     workflow.add_conditional_edges(
-        INTENT_CLASSIFICATION,
-        lambda state: "session_summary" if not state.get("conversation_history", []) else "supervisor",
+        SESSION_INIT,
+        first_turn_router,
         ["session_summary", "supervisor"]
     )
     
@@ -121,13 +122,8 @@ def create_rag_workflow(
     workflow.add_conditional_edges(
         SUPERVISOR,
         supervisor_router,
-        ["general_faq", "rag_search", "product_extraction", "product_search", "answer"]
+        ["rag_search", "product_extraction", "answer", "context_answer"]
     )
-    
-    # General FAQ node for banking questions
-    general_faq_with_slm = partial(general_faq_node, slm=slm)
-    workflow.add_node(GENERAL_FAQ, general_faq_with_slm)
-    workflow.add_edge(GENERAL_FAQ, ANSWER)
     
     # Product extraction node
     product_extraction_with_slm = partial(product_extraction_node, slm=slm)
@@ -139,20 +135,41 @@ def create_rag_workflow(
     workflow.add_node(PRODUCT_SEARCH, product_search_with_slm)
     workflow.add_edge(PRODUCT_SEARCH, ANSWER)
     
-    # Session summary node for first turn
+    # Session summary node for first turn only
     session_summary_with_slm = partial(session_summary_node, slm=slm)
     workflow.add_node(SESSION_SUMMARY, session_summary_with_slm)
     
-    # SESSION_SUMMARY 후 SUPERVISOR로 라우팅
+    # SESSION_SUMMARY 후 SUPERVISOR로 라우팅 (첫 대화만)
     workflow.add_edge(SESSION_SUMMARY, SUPERVISOR)
     
-    # RAG search node (VectorStore 인스턴스 재사용)
-    from ..rag.vector_store import VectorStore
-    vector_store = VectorStore()
-    vector_store.get_index_ready()  # 한 번만 초기화
+    # RAG search node (싱글톤 VectorStore 인스턴스 사용)
+    vector_store = get_shared_vector_store()
     rag_search_with_slm = partial(rag_search_node, slm=slm, vector_store=vector_store)
+    
     workflow.add_node(RAG_SEARCH, rag_search_with_slm)
     workflow.add_edge(RAG_SEARCH, ANSWER)
+    
+    # Context answer node - 맥락 기반 답변
+    context_answer_with_slm = partial(context_answer_node, slm=slm)
+    workflow.add_node(CONTEXT_ANSWER, context_answer_with_slm)
+    
+    # Context answer에서 조건부 라우팅 (검색 필요시 RAG/Product, 아니면 ANSWER)
+    def context_answer_router(state: RAGState) -> str:
+        """Context answer에서 조건부 라우팅"""
+        if state.get("redirect_to_rag"):
+            # RAG 검색이 필요한 경우
+            if state.get("product_name"):
+                return "product_extraction"  # 상품 검색
+            else:
+                return "rag_search"  # 일반 RAG 검색
+        else:
+            return "answer"  # 맥락 기반 답변 완료
+    
+    workflow.add_conditional_edges(
+        CONTEXT_ANSWER,
+        context_answer_router,
+        ["answer", "rag_search", "product_extraction"]
+    )
     
     # Answer node - final response generation
     workflow.add_node(ANSWER, answer_node)
@@ -163,12 +180,12 @@ def create_rag_workflow(
     workflow.add_node(GUARDRAIL_CHECK, guardrail_check_with_slm)
     workflow.add_edge(GUARDRAIL_CHECK, END)
     
-    # Compile workflow with tools for proper tool calling
-    from .tools import general_faq, rag_search, product_extraction, product_search, answer
-    
     return workflow.compile(
         checkpointer=checkpointer or MemorySaver(),
-        debug=False
+        debug=False,
+        # 성능 최적화 옵션
+        interrupt_before=[],  # 인터럽트 없음
+        interrupt_after=[],   # 인터럽트 없음
     )
 
 
@@ -202,7 +219,6 @@ def chat_send_message(message: str, session_id: str = "default") -> Dict[str, An
             "session_context": None,
             "conversation_history": [],
             "turn_id": "",
-            "intent_category": "",
             "guardrail_decision": "",
             "violations": [],
             "compliant_response": "",

@@ -7,45 +7,120 @@ LangGraph 공통 유틸리티 함수들
 import json
 import os
 import logging
+import sys
+import threading
+import time
 import yaml
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 
 logger = logging.getLogger(__name__)
 
-# ========== 상수 정의 ==========
-DEFAULT_SEARCH_K = 5
-DEFAULT_MAX_TURNS = 50
-DEFAULT_MAX_MESSAGES = 100
+# ========== 싱글톤 인스턴스 관리 ==========
 
-# ========== 에러 메시지 ==========
-ERROR_MESSAGES = {
-    "general_error": "죄송합니다. 처리 중 오류가 발생했습니다.",
-    "search_error": "죄송합니다. 검색 중 오류가 발생했습니다. 다시 시도해주세요.",
-    "no_documents": "죄송합니다. 관련 문서를 찾을 수 없습니다. 다른 키워드로 검색해보시겠어요?",
-    "guardrail_error": "죄송합니다. 응답 검증 중 오류가 발생했습니다.",
-    "faq_error": "죄송합니다. 일반적인 은행 FAQ 답변 생성 중 오류가 발생했습니다. 다시 시도해주세요.",
-    "product_error": "죄송합니다. 상품 검색 중 오류가 발생했습니다. 다시 시도해주세요.",
-    "extraction_error": "죄송합니다. 상품명 추출 중 오류가 발생했습니다.",
-}
+class SLMManager:
+    """SLM 인스턴스를 싱글톤으로 관리하는 클래스"""
+    _instance = None
+    _slm_instance = None
+    _lock = threading.Lock() if threading else None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def get_slm(self):
+        """SLM 인스턴스 반환 (필요시 생성)"""
+        if self._slm_instance is None:
+            # 지연 import로 순환 참조 방지
+            from ..slm.slm import SLM
+            self._slm_instance = SLM()
+            logger.debug("SLM instance created and cached")
+        return self._slm_instance
+
+
+class VectorStoreManager:
+    """VectorStore 인스턴스를 싱글톤으로 관리하는 클래스"""
+    _instance = None
+    _vector_store_instance = None
+    _lock = threading.Lock() if threading else None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def get_vector_store(self):
+        """VectorStore 인스턴스 반환 (필요시 생성)"""
+        if self._vector_store_instance is None:
+            # 지연 import로 순환 참조 방지
+            from ..rag.vector_store import VectorStore
+            self._vector_store_instance = VectorStore()
+            self._vector_store_instance.get_index_ready()  # 한 번만 초기화
+            logger.debug("VectorStore instance created and cached")
+        return self._vector_store_instance
+
+
+# 전역 매니저 인스턴스
+_slm_manager = SLMManager()
+_vector_store_manager = VectorStoreManager()
+
+
+def get_shared_slm():
+    """공유 SLM 인스턴스 가져오기"""
+    return _slm_manager.get_slm()
+
+
+def get_shared_vector_store():
+    """공유 VectorStore 인스턴스 가져오기"""
+    return _vector_store_manager.get_vector_store()
+
+
+# ========== 상수 정의 ==========
+DEFAULT_SEARCH_K = 3  # 검색 문서 수 감소 (속도 개선)
+DEFAULT_MAX_TURNS = 20  # 대화 턴 수 감소 (속도 개선)
+DEFAULT_MAX_MESSAGES = 50  # 메시지 수 감소 (속도 개선)
+DEFAULT_MESSAGE_HISTORY_LIMIT = 20  # 메시지 히스토리 제한 (속도 개선)
+
+# ========== 성능 최적화 상수 ==========
+MAX_CONTEXT_LENGTH = 2000  # 컨텍스트 최대 길이
+MAX_QUERY_LENGTH = 500  # 쿼리 최대 길이
+CACHE_TTL_SECONDS = 300  # 캐시 TTL (5분)
+MAX_CACHE_SIZE = 100  # 최대 캐시 크기
+BATCH_SIZE = 5  # 배치 처리 크기
+
+# ========== 에러 메시지 (prompts.yaml에서 로드) ==========
 
 # ========== 프롬프트 관리 함수들 ==========
 
+# 프롬프트 캐시 (전역 변수로 한 번만 로드)
+_prompts_cache: Optional[Dict[str, Any]] = None
+_cache_lock = threading.Lock() if 'threading' in sys.modules else None
+
 def load_prompts() -> Dict[str, Any]:
-    """Load prompts from YAML file"""
+    """Load prompts from YAML file with caching"""
+    global _prompts_cache
+    
+    if _prompts_cache is not None:
+        return _prompts_cache
+    
     current_dir = os.path.dirname(__file__)
     prompts_path = os.path.join(current_dir, "prompts.yaml")
     
     try:
         with open(prompts_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            _prompts_cache = yaml.safe_load(f)
+            logger.debug("Prompts loaded and cached successfully")
+            return _prompts_cache
     except FileNotFoundError:
         logger.warning(f"Prompts file not found: {prompts_path}")
-        return {}
+        _prompts_cache = {}
+        return _prompts_cache
     except Exception as e:
         logger.error(f"Error loading prompts: {e}")
-        return {}
+        _prompts_cache = {}
+        return _prompts_cache
 
 
 def get_prompt(category: str, **kwargs) -> str:
@@ -53,7 +128,7 @@ def get_prompt(category: str, **kwargs) -> str:
     Get formatted prompt from YAML template
     
     Args:
-        category: Prompt category (supervisor, etc.)
+        category: Prompt category (supervisor, routing_prompts, etc.)
         **kwargs: Variables to format into the prompt template
         
     Returns:
@@ -61,11 +136,16 @@ def get_prompt(category: str, **kwargs) -> str:
     """
     prompts = load_prompts()
     
-    if category not in prompts.get("system_prompts", {}):
+    # system_prompts 섹션에서 찾기
+    if category in prompts.get("system_prompts", {}):
+        prompt_template = prompts["system_prompts"][category]["system"]
+    # routing_prompts 섹션에서 찾기
+    elif category in prompts.get("routing_prompts", {}):
+        prompt_template = prompts["routing_prompts"][category]
+    else:
         logger.warning(f"Prompt category '{category}' not found")
         return f"프롬프트를 찾을 수 없습니다: {category}"
     
-    prompt_template = prompts["system_prompts"][category]["system"]
     try:
         return prompt_template.format(**kwargs)
     except KeyError as e:
@@ -102,83 +182,9 @@ def get_error_message(message_key: str, **kwargs) -> str:
         return f"에러 메시지 변수 오류: {e}"
 
 
-# ========== 기존 프롬프트 템플릿 (호환성 유지) ==========
-SYSTEM_PROMPTS = {
-    "rag_system": """당신은 KB금융그룹의 내부 직원을 위한 전문 상담사입니다.
-
-        다음 문서들을 참고하여 직원의 질문에 정확하고 도움이 되는 답변을 제공하세요:
-
-        {context_text}
-
-        지침:
-        1. 문서 내용을 바탕으로 정확한 정보를 제공하세요
-        2. 문서에 없는 정보는 추측하지 마세요
-        3. 전문적이고 업무 중심의 톤으로 답변하세요
-        4. 문서 출처는 언급하지 마세요 (링크나 참조 형태로 표시하지 마세요)
-        5. 답변은 5줄 이내로 간결하게 작성하세요
-        6. 마크다운 형식(*, **, # 등)을 사용하지 마세요
-        7. "추가적인 문의가 필요하시면", "상담해 드리겠습니다" 같은 일반 고객용 문구를 사용하지 마세요
-        8. 직원이 업무에 바로 활용할 수 있는 구체적인 정보를 제공하세요
-        9. 모든 문장을 완전한 형태로 작성하세요 ("~해야함", "~가능" 등으로 끝나지 않고 "-합니다/-입니다/-니다/-해요/-세요/-요" 등으로마무리)
-        10. 조건이나 자격 요건은 명확하고 자연스러운 문장으로 표현하세요""",
-            
-    "faq_system": """당신은 KB금융그룹의 내부 직원을 위한 전문 상담사입니다.
-        직원의 일반적인 은행 FAQ 질문에 대해 정확하고 도움이 되는 답변을 제공해주세요.
-
-        직원 질문: {query}
-
-        답변 지침:
-        1. 일반적인 은행 업무에 대한 정확한 정보를 제공하세요
-        2. 예금, 적금, 대출, 카드 등 기본적인 금융 상품에 대해 설명하세요
-        3. 전문적이고 업무 중심의 언어로 답변하세요
-        4. 답변은 3-5줄로 간결하게 작성하세요
-        5. 마크다운 형식(*, **, # 등)을 사용하지 마세요
-        6. "추가적인 문의가 필요하시면", "상담해 드리겠습니다" 같은 일반 고객용 문구를 사용하지 마세요
-        7. 직원이 업무에 바로 활용할 수 있는 구체적인 정보를 제공하세요
-        8. 모든 문장을 완전한 형태로 작성하세요 ("~해야함", "~가능" 등으로 끝나지 않고 "-합니다/-입니다/-니다/-해요/-세요/-요" 등으로 마무리)
-        9. 조건이나 자격 요건은 명확하고 자연스러운 문장으로 표현하세요
-
-        KB금융그룹의 내부 직원을 위한 전문 상담사로서 신뢰할 수 있는 정보를 제공해주세요.""",
-        
-    "product_extraction_system": """다음 질문에서 KB금융그룹의 상품명을 추출하세요.
-
-        질문: {query}
-
-        추출할 상품명 예시:
-        - 햇살론, 내집마련디딤돌대출, 입주자 앞 대환대출, 버팀목 전세자금대출, 매직카대출, 군인 연금 협약 대출, 폐업지원 대환대출, 닥터론, 로이어론
-        - 대출상품, 예금상품, 적금상품, 보험상품, 펀드상품
-
-        상품명이 있으면 정확히 추출하고, 없으면 "일반"이라고 답하세요.
-        답변 형식: [상품명]""",
-        
-        "supervisor_system": """당신은 KB금융그룹의 중앙 관리자입니다.
-        사용자의 요청을 분석하고 적절한 도구를 선택해주세요.
-
-        사용자 요청: {query}
-        첫 대화 여부: {is_first_turn}
-        의도 분류: {intent_category}
-        현재 응답 상태: {response_status}
-        추출된 상품명: {product_name}
-
-        의도 분류별 권장 도구:
-        - general_banking_FAQs: 일반적인 은행 FAQ → general_faq (SLM 직접 답변)
-        - industry_policies_and_regulations: 규제/정책 관련 → rag_search  
-        - company_rules: 회사 내부 규칙 → rag_search
-        - company_products: 회사 상품 관련 → product_extraction (상품명 있으면) 또는 rag_search
-
-        상황에 맞는 도구를 선택하세요:
-        - general_faq: 일반적인 은행 FAQ (예금, 적금, 대출 기본 개념 등)
-        - rag_search: 문서 검색이 필요한 구체적인 질문
-        - product_extraction: 특정 상품명이 언급된 질문에서 상품명 추출
-        - product_search: 추출된 상품명으로 상품 정보 검색
-        - session_summary: 첫 대화일 때 세션 요약 생성
-        - answer: 충분한 정보로 최종 답변 준비됨
-
-        {response_guidance}
-        {product_guidance}
-
-        신중하게 분석하고 가장 적절한 도구를 선택해주세요."""
-    }
+# ========== 기존 프롬프트 템플릿 (호환성 유지) - 제거됨 ==========
+# SYSTEM_PROMPTS 딕셔너리는 prompts.yaml로 이관되었습니다.
+# get_prompt() 함수를 사용하여 프롬프트를 로드하세요.
 
 def create_title_generation_prompt(query: str) -> str:
     """
@@ -267,9 +273,12 @@ def format_context(documents: List[Document]) -> str:
         str: 포맷팅된 컨텍스트 문자열
     """
     lines = []
-    max_context_length = 2000  # 컨텍스트 길이 제한
+    current_length = 0
     
     for i, doc in enumerate(documents, 1):
+        if current_length >= MAX_CONTEXT_LENGTH:
+            break
+            
         src = doc.metadata.get("source", f"document_{i}") if doc.metadata else f"document_{i}"
         snippet = doc.page_content.strip()
         if not snippet:
@@ -279,32 +288,47 @@ def format_context(documents: List[Document]) -> str:
         if len(snippet) > 500:
             snippet = snippet[:500] + "..."
         
-        lines.append(f"[source: {src}]\n{snippet}")
-        
-        # 전체 컨텍스트 길이 제한
-        current_length = len("\n---\n".join(lines))
-        if current_length > max_context_length:
-            break
+        line = f"[source: {src}]\n{snippet}"
+        lines.append(line)
+        current_length += len(line) + 5  # "\n---\n" 길이 고려
     
     return "\n---\n".join(lines)
 
 
 def extract_sources_from_docs(documents: List[Document]) -> List[Dict[str, Any]]:
     """
-    문서들에서 소스 정보 추출
+    문서들에서 소스 정보 추출 (프론트엔드 표시용)
     
     Args:
         documents: Document 리스트
         
     Returns:
-        List[Dict]: 소스 정보 리스트
+        List[Dict]: 소스 정보 리스트 (프론트엔드 친화적 구조)
     """
     sources = []
-    for doc in documents:
+    for i, doc in enumerate(documents):
         metadata = doc.metadata or {}
-        source_info = dict(metadata)
-        source_info['text'] = doc.page_content
+        
+        # 프론트엔드에서 표시하기 쉬운 구조로 변환
+        source_info = {
+            'id': i + 1,  # 소스 ID
+            'file_name': metadata.get('file_name', 'Unknown'),  # PDF 파일명
+            'file_path': metadata.get('file_path', ''),  # 파일 경로
+            'page_number': metadata.get('page_number', 0),  # 페이지 번호
+            'main_category': metadata.get('main_category', ''),  # 메인 카테고리
+            'sub_category': metadata.get('sub_category', ''),  # 서브 카테고리
+            'text': doc.page_content[:200] + '...' if len(doc.page_content) > 200 else doc.page_content,  # 내용 미리보기
+            'full_text': doc.page_content,  # 전체 내용
+            'relevance_score': getattr(doc, 'score', 0.0) if hasattr(doc, 'score') else 0.0,  # 관련도 점수
+        }
+        
+        # 원본 메타데이터도 보존 (필요시 사용)
+        source_info['metadata'] = metadata
+        
         sources.append(source_info)
+    
+    logger.debug(f"📄 [SOURCES] 추출된 소스 정보: {len(sources)}개")
+    
     return sources
 
 
@@ -321,13 +345,13 @@ def create_rag_response(slm_instance, query: str, documents: List[Document]) -> 
         tuple: (응답 텍스트, 소스 정보 리스트)
     """
     if not documents:
-        return ERROR_MESSAGES["no_documents"], []
+        return get_error_message("no_documents"), []
     
     # 컨텍스트 생성
     context_text = format_context(documents)
     
     # LLM으로 응답 생성
-    system_prompt = SYSTEM_PROMPTS["rag_system"].format(context_text=context_text)
+    system_prompt = get_prompt("rag_system", context_text=context_text)
     messages = [HumanMessage(content=system_prompt), HumanMessage(content=query)]
     response = slm_instance.invoke(messages)
     
@@ -350,10 +374,31 @@ def create_simple_response(slm_instance, query: str, prompt_type: str) -> str:
         str: 생성된 응답
     """
     try:
-        prompt = SYSTEM_PROMPTS[prompt_type].format(query=query)
+        # prompt_type을 그대로 사용 (YAML 키와 매치)
+        prompt = get_prompt(prompt_type, query=query)
         return slm_instance.invoke(prompt)
     except Exception:
-        return ERROR_MESSAGES.get(f"{prompt_type.replace('_system', '_error')}", ERROR_MESSAGES["general_error"])
+        return get_error_message(f"{prompt_type.replace('_system', '_error')}")
+
+
+def trim_message_history(messages: List[BaseMessage], max_messages: int = DEFAULT_MESSAGE_HISTORY_LIMIT) -> List[BaseMessage]:
+    """
+    메시지 히스토리를 제한하여 메모리 누수 방지
+    
+    Args:
+        messages: 메시지 리스트
+        max_messages: 최대 메시지 수 (기본값: 50)
+        
+    Returns:
+        제한된 메시지 리스트 (최신 메시지들만 유지)
+    """
+    if len(messages) <= max_messages:
+        return messages
+        
+    # 최신 메시지들만 유지
+    trimmed_messages = messages[-max_messages:]
+    logger.info(f"Message history trimmed: {len(messages)} -> {len(trimmed_messages)}")
+    return trimmed_messages
 
 
 def create_guardrail_response(slm_instance, response: str) -> tuple[str, List[str]]:
@@ -368,46 +413,167 @@ def create_guardrail_response(slm_instance, response: str) -> tuple[str, List[st
         tuple: (준수 응답, 위반 사항 리스트)
     """
     try:
+        # 가드레일 비활성화 옵션 (환경변수로 제어)
+        import os
+        if os.getenv("DISABLE_GUARDRAIL", "false").lower() == "true":
+            logger.info("🛡️ [GUARDRAIL] Disabled by environment variable")
+            return response, []
+        
+        logger.info("🛡️ [GUARDRAIL] Loading config...")
         # YAML 정책 기반 가드레일 검사
         guardrail_config = load_guardrail_config()
+        logger.info("🛡️ [GUARDRAIL] Config loaded")
         
         # 기본 응답
         compliant_response = response
         violations = []
         
-        # 품질 검사
-        if guardrail_config.get("quality", {}).get("accuracy_check", {}).get("enabled", False):
-            violations.extend(check_accuracy(response, guardrail_config))
-        
+        # 품질 검사 (빠른 체크 우선)
+        logger.info("🛡️ [GUARDRAIL] Checking completeness...")
         if guardrail_config.get("quality", {}).get("completeness_check", {}).get("enabled", False):
             violations.extend(check_completeness(response, guardrail_config))
         
-        # 용어 정규화
+        # 정확성 검사 (더 복잡한 검사)
+        logger.info("🛡️ [GUARDRAIL] Checking accuracy...")
+        if guardrail_config.get("quality", {}).get("accuracy_check", {}).get("enabled", False):
+            violations.extend(check_accuracy(response, guardrail_config))
+        
+        # 용어 정규화 (캐싱 적용)
+        logger.info("🛡️ [GUARDRAIL] Normalizing terminology...")
         if guardrail_config.get("terminology", {}).get("normalization", {}).get("enabled", False):
             compliant_response = normalize_terminology(compliant_response, guardrail_config)
         
-        # 구조 검사
+        # 구조 검사 (선택적)
+        logger.info("🛡️ [GUARDRAIL] Applying emphasis...")
         if guardrail_config.get("structure", {}).get("emphasis", {}).get("enabled", False):
             compliant_response = apply_emphasis(compliant_response, guardrail_config)
         
         # 위반이 있는 경우 안전한 응답으로 대체
         if violations:
+            logger.warning(f"🛡️ [GUARDRAIL] Found {len(violations)} violations")
             compliant_response = "죄송합니다. 해당 질문에 대해서는 정확한 답변을 드리기 어렵습니다. 관련 부서에 문의해주세요."
         
+        logger.info("🛡️ [GUARDRAIL] Guardrail check completed")
         return compliant_response, violations
         
-    except Exception:
-        return ERROR_MESSAGES["guardrail_error"], ["가드레일 검사 오류"]
+    except Exception as e:
+        logger.error(f"🛡️ [GUARDRAIL] Error: {e}")
+        return get_error_message("guardrail_error"), ["가드레일 검사 오류"]
 
+
+# 전역 캐시 변수
+_guardrail_config_cache = None
+_glossary_terms_cache = None
+_search_cache = {}  # 검색 결과 캐싱
+_conversation_history_cache = {}  # 대화 히스토리 캐싱
+
+def get_cached_search_result(query: str, product_name: str = "") -> Optional[List[Document]]:
+    """검색 결과 캐시에서 가져오기 (TTL 체크 포함)"""
+    cache_key = f"{query}:{product_name}"
+    if cache_key in _search_cache:
+        cache_entry = _search_cache[cache_key]
+        # TTL 체크
+        if time.time() - cache_entry.get("timestamp", 0) < CACHE_TTL_SECONDS:
+            return cache_entry.get("documents")
+        else:
+            # 만료된 캐시 제거
+            del _search_cache[cache_key]
+    return None
+
+def set_cached_search_result(query: str, product_name: str, documents: List[Document]) -> None:
+    """검색 결과 캐시에 저장 (TTL 포함)"""
+    cache_key = f"{query}:{product_name}"
+    _search_cache[cache_key] = {
+        "documents": documents,
+        "timestamp": time.time()
+    }
+    # 캐시 크기 제한 (메모리 누수 방지)
+    if len(_search_cache) > MAX_CACHE_SIZE:
+        # LRU 방식으로 가장 오래된 항목 제거
+        oldest_key = min(_search_cache.keys(), 
+                        key=lambda k: _search_cache[k].get("timestamp", 0))
+        del _search_cache[oldest_key]
+
+def get_django_conversation_history(session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Django에서 대화 히스토리를 로드하는 함수 (캐싱 + 성능 최적화)
+    
+    Args:
+        session_id: 세션 ID
+        limit: 최대 로드할 대화 수
+        
+    Returns:
+        대화 히스토리 리스트
+    """
+    global _conversation_history_cache
+    
+    # 캐시에서 확인
+    cache_key = f"history_{session_id}_{limit}"
+    if cache_key in _conversation_history_cache:
+        logger.info(f"📚 [HISTORY] Using cached conversation history for session {session_id}")
+        return _conversation_history_cache[cache_key]
+    
+    try:
+        # Django에서 대화 히스토리 로드 (실제 구현은 Django API 호출)
+        logger.info(f"📚 [HISTORY] Loading conversation history from Django for session {session_id}")
+        
+        # TODO: 실제 Django API 호출 구현
+        # 예시: 
+        # import requests
+        # response = requests.get(f"/api/conversation-history/{session_id}?limit={limit}")
+        # history = response.json()
+        
+        # 임시로 빈 리스트 (실제 구현 시 Django API 호출)
+        history = []
+        
+        # 캐시에 저장 (TTL: 5분)
+        _conversation_history_cache[cache_key] = {
+            "data": history,
+            "timestamp": time.time()
+        }
+        
+        # 캐시 크기 제한 (메모리 효율성)
+        if len(_conversation_history_cache) > 50:
+            # 가장 오래된 항목 제거
+            oldest_key = min(_conversation_history_cache.keys(), 
+                           key=lambda k: _conversation_history_cache[k].get("timestamp", 0))
+            del _conversation_history_cache[oldest_key]
+        
+        return history
+        
+    except Exception as e:
+        logger.error(f"📚 [HISTORY] Failed to load conversation history: {e}")
+        return []
+
+def clear_conversation_history_cache(session_id: str = None) -> None:
+    """대화 히스토리 캐시 클리어"""
+    global _conversation_history_cache
+    
+    if session_id:
+        # 특정 세션 캐시만 클리어
+        keys_to_remove = [key for key in _conversation_history_cache.keys() if f"history_{session_id}_" in key]
+        for key in keys_to_remove:
+            del _conversation_history_cache[key]
+        logger.info(f"📚 [HISTORY] Cleared cache for session {session_id}")
+    else:
+        # 전체 캐시 클리어
+        _conversation_history_cache.clear()
+        logger.info("📚 [HISTORY] Cleared all conversation history cache")
 
 def load_guardrail_config() -> Dict[str, Any]:
-    """가드레일 YAML 설정 로드"""
+    """가드레일 YAML 설정 로드 (캐싱 적용)"""
+    global _guardrail_config_cache
+    
+    if _guardrail_config_cache is not None:
+        return _guardrail_config_cache
+    
     try:
         current_dir = os.path.dirname(__file__)
         config_path = os.path.join(current_dir, "guardrails", "policy_rules.yaml")
         
         with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            _guardrail_config_cache = yaml.safe_load(f)
+            return _guardrail_config_cache
     except Exception as e:
         logger.error(f"Failed to load guardrail config: {e}")
         return {}
@@ -425,8 +591,22 @@ def check_accuracy(response: str, config: Dict[str, Any]) -> List[str]:
     triggers = accuracy_config.get("triggers", {})
     keywords = triggers.get("keywords", [])
     
+    # 컨텍스트 감지 설정
+    context_detection = accuracy_config.get("context_detection", {})
+    product_indicators = context_detection.get("product_indicators", [])
+    banking_terms = context_detection.get("banking_terms", [])
+    
     for keyword in keywords:
         if keyword in response:
+            # 상품 설명 컨텍스트가 있는지 확인
+            has_product_context = any(indicator in response for indicator in product_indicators)
+            has_banking_context = any(term in response for term in banking_terms)
+            
+            if has_product_context or has_banking_context:
+                logger.info(f"🛡️ [GUARDRAIL] Trigger keyword '{keyword}' found but product/banking context detected - allowing")
+                continue
+                
+            logger.warning(f"🛡️ [GUARDRAIL] Found trigger keyword: '{keyword}' in response")
             violations.append(f"검증이 필요한 키워드 포함: {keyword}")
     
     return violations
@@ -448,16 +628,20 @@ def check_completeness(response: str, config: Dict[str, Any]) -> List[str]:
 
 
 def normalize_terminology(response: str, config: Dict[str, Any]) -> str:
-    """용어 정규화"""
+    """용어 정규화 (캐싱 적용)"""
+    global _glossary_terms_cache
+    
     try:
-        current_dir = os.path.dirname(__file__)
-        glossary_path = os.path.join(current_dir, "guardrails", "glossary_terms.yaml")
-        
-        with open(glossary_path, 'r', encoding='utf-8') as f:
-            glossary = yaml.safe_load(f)
+        # 캐시에서 로드
+        if _glossary_terms_cache is None:
+            current_dir = os.path.dirname(__file__)
+            glossary_path = os.path.join(current_dir, "guardrails", "glossary_terms.yaml")
+            
+            with open(glossary_path, 'r', encoding='utf-8') as f:
+                _glossary_terms_cache = yaml.safe_load(f)
         
         # 용어 치환
-        terms = glossary.get("terms", [])
+        terms = _glossary_terms_cache.get("terms", [])
         for term in terms:
             from_term = term.get("from", "")
             to_term = term.get("to", "")
@@ -562,50 +746,31 @@ def classify_product_subcategory(product_name: str) -> str:
         return "일반"
 
 
-def create_supervisor_prompt(query: str, is_first_turn: bool, intent_category: str, 
-                           has_response: bool, extracted_product: str, has_product_name: bool) -> str:
+def create_supervisor_prompt(query: str) -> str:
     """
-    슈퍼바이저 프롬프트 생성
+    슈퍼바이저 프롬프트 생성 (새로운 3가지 노드 워크플로우용)
     
     Args:
         query: 사용자 쿼리
-        is_first_turn: 첫 대화 여부
-        intent_category: 의도 분류
-        has_response: 응답 생성 여부
-        extracted_product: 추출된 상품명
-        has_product_name: 상품명 존재 여부
         
     Returns:
         str: 슈퍼바이저 프롬프트
     """
-    response_status = "응답 생성됨" if has_response else "응답 없음"
-    product_name = extracted_product if has_product_name else "없음"
-    
-    response_guidance = "응답이 이미 생성되었으므로 answer를 선택하세요." if has_response else ""
-    product_guidance = "상품명이 추출되었으므로 반드시 product_search를 선택하세요." if has_product_name and not has_response else ""
-    
     try:
-        return get_prompt("supervisor", 
-            query=query,
-            is_first_turn=is_first_turn,
-            intent_category=intent_category,
-            response_status=response_status,
-            product_name=product_name,
-            response_guidance=response_guidance,
-            product_guidance=product_guidance
-        )
+        return get_prompt("supervisor", query=query)
     except KeyError as e:
         logger.error(f"Prompt formatting error: {e}")
         # 폴백 프롬프트 사용
-        return f"""당신은 KB금융그룹의 중앙 관리자입니다. 사용자의 질문을 분석하여 적절한 도구를 선택하세요.
+        return f"""당신은 KB금융그룹의 중앙 관리자입니다. 사용자의 질문을 분석하여 적절한 노드를 선택하세요.
         
         사용자 질문: {query}
-        첫 대화 여부: {is_first_turn}
-        의도 분류: {intent_category}
         
-        **중요**: 첫 대화(is_first_turn=True)일 때는 반드시 session_summary를 먼저 선택하세요.
+        사용 가능한 노드:
+        - answer: 최종 답변 생성
+        - rag_search: 문서 검색이 필요한 질문
+        - product_extraction: 상품명 추출이 필요한 질문
         
-        적절한 도구를 선택하고 reasoning을 제공하세요."""
+        적절한 노드를 선택하고 reasoning을 제공하세요."""
 
 def create_error_response(error_type: str, **kwargs) -> Dict[str, Any]:
     """
@@ -619,7 +784,64 @@ def create_error_response(error_type: str, **kwargs) -> Dict[str, Any]:
         Dict: 에러 응답 딕셔너리
     """
     return {
-        "response": ERROR_MESSAGES.get(error_type, ERROR_MESSAGES["general_error"]),
+        "response": get_error_message(error_type),
         "sources": kwargs.get("sources", []),
         "ready_to_answer": True
+    }
+
+
+# ========== 성능 최적화 유틸리티 함수들 ==========
+
+def optimize_query_length(query: str, max_length: int = MAX_QUERY_LENGTH) -> str:
+    """쿼리 길이 최적화"""
+    if len(query) > max_length:
+        return query[:max_length].rsplit(' ', 1)[0] + "..."
+    return query
+
+
+def batch_process_items(items: List[Any], batch_size: int = BATCH_SIZE) -> List[List[Any]]:
+    """배치 처리로 메모리 효율성 향상"""
+    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def cleanup_expired_cache():
+    """만료된 캐시 정리"""
+    global _search_cache, _conversation_history_cache
+    current_time = time.time()
+    
+    # 검색 캐시 정리
+    expired_keys = []
+    for key, value in _search_cache.items():
+        if current_time - value.get("timestamp", 0) > CACHE_TTL_SECONDS:
+            expired_keys.append(key)
+    
+    for key in expired_keys:
+        del _search_cache[key]
+    
+    # 대화 히스토리 캐시 정리
+    expired_history_keys = []
+    for key, value in _conversation_history_cache.items():
+        if current_time - value.get("timestamp", 0) > CACHE_TTL_SECONDS:
+            expired_history_keys.append(key)
+    
+    for key in expired_history_keys:
+        del _conversation_history_cache[key]
+    
+    if expired_keys or expired_history_keys:
+        logger.info(f"🧹 [CACHE] Cleaned up {len(expired_keys)} search cache and {len(expired_history_keys)} history cache entries")
+
+
+def get_memory_usage() -> Dict[str, Any]:
+    """메모리 사용량 모니터링"""
+    import psutil
+    import os
+    
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    
+    return {
+        "rss_mb": memory_info.rss / 1024 / 1024,  # 실제 메모리 사용량
+        "vms_mb": memory_info.vms / 1024 / 1024,  # 가상 메모리 사용량
+        "cache_size": len(_search_cache),
+        "history_cache_size": len(_conversation_history_cache)
     }

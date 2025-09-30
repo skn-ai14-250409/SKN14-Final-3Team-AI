@@ -7,6 +7,8 @@
 python run_server.py --reload --host 0.0.0.0 --port 8000
 
 python run_server.py --host 0.0.0.0 --port 8001 --reload # <-- django랑 같이 할 때 서버가 8000으로 같으면 안됨
+
+Get-Content app.log -Encoding UTF8 -Wait -Tail 10 # <-- 로그 같이 찍는거 확인 해보기>
 ```
 
 ### 2. 데이터 업로드
