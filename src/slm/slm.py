@@ -234,6 +234,13 @@ class SLM:
     def __init__(self):
         self.provider = MODEL_PROVIDER
 
+        print(f'{MODEL_NAME=}')       
+        print(f'{MODEL_KEY=}')       
+        print(f'{MODEL_BASE_URL=}')       
+        print(f'{MODEL_PROVIDER=}')       
+        print(f'{ENABLE_OPENAI_FALLBACK=}')
+        print(f'{FALLBACK_MODEL_NAME=}')     
+
         primary_llm = self._create_llm(
             model_name=MODEL_NAME,
             api_key=MODEL_KEY,
