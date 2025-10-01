@@ -84,11 +84,11 @@ DEFAULT_MAX_MESSAGES = 100  # 메시지 수 증가 (3번 제한 해결)
 DEFAULT_MESSAGE_HISTORY_LIMIT = 50  # 메시지 히스토리 제한 증가 (3번 제한 해결)
 
 # ========== 성능 최적화 상수 ==========
-MAX_CONTEXT_LENGTH = 2000  # 컨텍스트 최대 길이
-MAX_QUERY_LENGTH = 500  # 쿼리 최대 길이
-CACHE_TTL_SECONDS = 300  # 캐시 TTL (5분)
-MAX_CACHE_SIZE = 100  # 최대 캐시 크기
-BATCH_SIZE = 5  # 배치 처리 크기
+MAX_CONTEXT_LENGTH = 1500  # 컨텍스트 최대 길이 (메모리 절약을 위해 단축)
+MAX_QUERY_LENGTH = 300  # 쿼리 최대 길이 (메모리 절약을 위해 단축)
+CACHE_TTL_SECONDS = 180  # 캐시 TTL (3분으로 단축 - 메모리 절약)
+MAX_CACHE_SIZE = 50  # 최대 캐시 크기 (메모리 절약을 위해 감소)
+BATCH_SIZE = 3  # 배치 처리 크기 (메모리 절약을 위해 감소)
 
 # ========== 에러 메시지 (prompts.yaml에서 로드) ==========
 
@@ -835,13 +835,47 @@ def get_memory_usage() -> Dict[str, Any]:
     """메모리 사용량 모니터링"""
     import psutil
     import os
+    import gc
     
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
+    
+    # 가비지 컬렉션 강제 실행 (메모리 누수 방지)
+    gc.collect()
     
     return {
         "rss_mb": memory_info.rss / 1024 / 1024,  # 실제 메모리 사용량
         "vms_mb": memory_info.vms / 1024 / 1024,  # 가상 메모리 사용량
         "cache_size": len(_search_cache),
-        "history_cache_size": len(_conversation_history_cache)
+        "history_cache_size": len(_conversation_history_cache),
+        "gc_objects": len(gc.get_objects())  # 가비지 컬렉션 객체 수
+    }
+
+def force_memory_cleanup():
+    """메모리 강제 정리 (메모리 폭발 방지)"""
+    import gc
+    import psutil
+    import os
+    
+    # 가비지 컬렉션 강제 실행 (여러 번 실행)
+    collected = 0
+    for _ in range(3):  # 3번 반복하여 완전 정리
+        collected += gc.collect()
+    
+    # 메모리 사용량 확인
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+    
+    logger.info(f"🧹 [MEMORY] Forced cleanup: collected {collected} objects, memory: {memory_mb:.2f}MB")
+    
+    # 메모리 사용량이 1GB 이상이면 심각한 경고
+    if memory_mb > 1000:
+        logger.error(f"🚨 [MEMORY] CRITICAL: Memory usage {memory_mb:.2f}MB - possible memory leak!")
+    elif memory_mb > 500:
+        logger.warning(f"⚠️ [MEMORY] High memory usage: {memory_mb:.2f}MB")
+        
+    return {
+        "collected_objects": collected,
+        "memory_mb": memory_mb
     }
