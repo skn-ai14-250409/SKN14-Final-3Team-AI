@@ -157,7 +157,7 @@ class WorkflowExecutionResult(BaseModel):
 class RAGState(TypedDict):
     """LangGraph RAG 워크플로우 상태"""
     # Core conversation data
-    messages: Annotated[Sequence[Union[BaseMessage, dict]], operator.add]
+    messages: List[Union[BaseMessage, dict]]  # 🚨 operator.add 제거 - 메모리 누수 방지
     query: str
     response: str
     
