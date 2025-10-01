@@ -241,6 +241,7 @@ class SLM:
             MODEL_PROVIDER == "vllm"
             and MODEL_BASE_URL
             and self._check_vllm_server()
+
         )
         
         # vLLM 사용 가능 여부에 따라 primary_llm 생성
