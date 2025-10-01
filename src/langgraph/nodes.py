@@ -56,7 +56,7 @@ from .utils import get_shared_slm, get_shared_vector_store
 logger = logging.getLogger(__name__)
 
 # 로깅 레벨 확인 (성능 최적화용)
-DEBUG_MODE = True  # 디버그 모드 강제 활성화
+DEBUG_MODE = logger.isEnabledFor(logging.DEBUG)
 INFO_MODE = logger.isEnabledFor(logging.INFO)
 
 # 성능 최적화를 위한 로깅 제어
@@ -127,12 +127,10 @@ def session_init_node(state: RAGState) -> RAGState:
         # Django에서 전달받은 conversation_history가 있으면 사용, 없으면 세션 매니저에서 로드
         django_history = state.get("conversation_history", [])
         if django_history:
-            # 성능 최적화: 최근 5개 메시지만 사용 (12번째 턴에서 성능 저하 방지)
-            recent_history = django_history[-5:] if len(django_history) > 5 else django_history
-            logger.info(f"[SESSION_INIT] Using Django conversation history: {len(recent_history)} messages (total: {len(django_history)})")
-            conversation_history = recent_history
+            logger.info(f"[SESSION_INIT] Using Django conversation history: {len(django_history)} messages")
+            conversation_history = django_history
         else:
-            conversation_history = session_manager.get_conversation_history(session_context.session_id, limit=10)
+            conversation_history = session_manager.get_conversation_history(session_context.session_id, limit=5)
         
         return {
             **state,
@@ -173,8 +171,9 @@ def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
     # 실행 경로 추적
     state = track_execution_path(state, "supervisor_node")
     
-    # 노드 실행 경로 로그
-    logger.info(f"🔄 [NODE] supervisor_node 시작 - query: {state.get('query', '')[:50]}...")
+    # 상세한 워크플로우 로그
+    logger.info(f"🔄 [WORKFLOW] supervisor_node 시작 - 입력: {list(state.keys())}")
+    logger.info(f"🔄 [WORKFLOW] supervisor_node - query: {state.get('query', '')[:50]}...")
     
     query = state.get("query", "")
     session_context = state.get("session_context")
@@ -342,8 +341,9 @@ def supervisor_router(state: RAGState, slm: SLM = None) -> str:
     logger.info("[ROUTER] supervisor_router 실행 시작")
     logger.info(f"[ROUTER] ready_to_answer: {state.get('ready_to_answer')}")
     
-    # 노드 실행 경로 로그
-    logger.info(f"🔄 [ROUTER] supervisor_router 시작 - 플래그: needs_rag_search={state.get('needs_rag_search')}, needs_context_answer={state.get('needs_context_answer')}")
+    # 상세한 워크플로우 로그
+    logger.info(f"🔄 [WORKFLOW] supervisor_router 시작 - 플래그: needs_rag_search={state.get('needs_rag_search')}, needs_context_answer={state.get('needs_context_answer')}")
+    logger.info(f"🔄 [WORKFLOW] supervisor_router - redirect_to_rag: {state.get('redirect_to_rag')}")
     
     # messages에서 마지막 메시지 확인
     messages = state.get("messages", [])
@@ -423,7 +423,6 @@ def supervisor_router(state: RAGState, slm: SLM = None) -> str:
 def product_extraction_node(state: RAGState, slm: SLM = None) -> RAGState:
     """상품명 추출 노드"""
     logger.info("🏷️ [NODE] product_extraction_node 실행 시작")
-    logger.info(f"🔄 [NODE] product_extraction_node 시작 - query: {state.get('query', '')[:50]}...")
     # 실행 경로 추적
     state = track_execution_path(state, "product_extraction_node")
     
@@ -461,7 +460,6 @@ def product_extraction_node(state: RAGState, slm: SLM = None) -> RAGState:
 def product_search_node(state: RAGState, slm: SLM = None) -> RAGState:
     """상품 검색 노드"""
     logger.info("🔍 [NODE] product_search_node 실행 시작")
-    logger.info(f"🔄 [NODE] product_search_node 시작 - query: {state.get('query', '')[:50]}...")
     # 실행 경로 추적
     state = track_execution_path(state, "product_search_node")
     
@@ -529,11 +527,6 @@ def product_search_node(state: RAGState, slm: SLM = None) -> RAGState:
         response, sources = create_rag_response(slm, query, retrieved_docs)
         end_llm_time = time.time()
         logger.info(f"[PRODUCT_SEARCH] LLM response generation: {end_llm_time - start_llm_time:.2f}초")
-        
-        # 실행 경로 로깅
-        execution_path = state.get("execution_path", [])
-        path_str = " -> ".join(execution_path)
-        logger.info(f"🔄 [WORKFLOW] Execution path: {path_str}")
         
         return {
             **state,
@@ -617,7 +610,6 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
     """RAG 검색 노드"""
     start_time = time.time()
     logger.info("[RAG_SEARCH] Starting document search")
-    logger.info(f"🔄 [NODE] rag_search_node 시작 - query: {state.get('query', '')[:50]}...")
     # 실행 경로 추적
     state = track_execution_path(state, "rag_search_node")
     
@@ -638,17 +630,12 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
         messages = state.get("messages", [])
         enhanced_query = query
         
-        # 성능 최적화: 맥락 처리 제한 (최근 2개 메시지만)
+        # 최근 1개 메시지만 고려하여 성능 향상
         if messages and len(messages) > 1:
-            # 최근 2개 메시지만 고려하여 성능 향상
-            recent_messages = messages[-2:] if len(messages) >= 2 else messages
-            context_parts = []
-            for msg in recent_messages:
-                if hasattr(msg, 'content') and len(msg.content) < 50:  # 짧은 메시지만
-                    context_parts.append(msg.content[:20])  # 20자로 제한
-            
-            if context_parts:
-                context_snippet = " ".join(context_parts)
+            last_msg = messages[-3]  # 마지막 사용자 메시지만 고려
+            if hasattr(last_msg, 'content') and len(last_msg.content) < 100:
+                # 문자열 연결 최적화
+                context_snippet = last_msg.content[:30]
                 enhanced_query = f"{query} {context_snippet}"
                 if DEBUG_MODE:
                     logger.debug(f"[RAG_SEARCH] Enhanced query with context: {enhanced_query[:100]}...")
@@ -668,11 +655,6 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
         end_time = time.time()
         execution_time = end_time - start_time
         logger.info(f"📚 [NODE] rag_search_node 완료 - 실행시간: {execution_time:.2f}초")
-        
-        # 실행 경로 로깅
-        execution_path = state.get("execution_path", [])
-        path_str = " -> ".join(execution_path)
-        logger.info(f"🔄 [WORKFLOW] Execution path: {path_str}")
         
         return {
             **state,
@@ -733,11 +715,9 @@ def guardrail_check_node(state: RAGState, slm: SLM = None) -> RAGState:
             if any(word in response for word in forbidden_words):
                 violations.append("부적절한 표현이 포함되어 있습니다")
             
-            # 3. 완성도 검사 제거 - 너무 엄격한 기준으로 정상 응답이 위반 처리됨
-            # completion_endings = ['.', '!', '?', '다',    
-            # if not any(response.strip().endswith(ending) for ending in completion_endings):
-            #     if len(response.strip()) > 20:
-            #         violations.append("응답이 완성되지 않았습니다")
+            # 3. 기본 완성도 검사 (빠름)
+            if not response.endswith(('.', '!', '?', '다', '요', '니다')):
+                violations.append("응답이 완성되지 않았습니다")
             
             # 위반이 있는 경우에만 안전한 응답으로 대체
             if violations:
@@ -902,7 +882,6 @@ def context_answer_node(state: RAGState, slm: SLM = None) -> RAGState:
 def answer_node(state: RAGState) -> RAGState:
     """최종 답변 노드"""
     start_time = time.time()
-    logger.info(f"🔄 [NODE] answer_node 시작 - query: {state.get('query', '')[:50]}...")
     # 로깅 최소화 (성능 개선)
     if DEBUG_MODE:
         logger.debug("📝 [NODE] ANSWER_NODE 진입")
@@ -969,11 +948,6 @@ def answer_node(state: RAGState) -> RAGState:
     end_time = time.time()
     execution_time = end_time - start_time
     logger.info(f"✅ [NODE] answer_node 완료 - 실행시간: {execution_time:.2f}초")
-    
-    # 실행 경로 로깅
-    execution_path = state.get("execution_path", [])
-    path_str = " -> ".join(execution_path)
-    logger.info(f"🔄 [WORKFLOW] Execution path: {path_str}")
     
     return {
         **state,

@@ -79,9 +79,9 @@ def get_shared_vector_store():
 
 # ========== 상수 정의 ==========
 DEFAULT_SEARCH_K = 3  # 검색 문서 수 감소 (속도 개선)
-DEFAULT_MAX_TURNS = 50  # 대화 턴 수 증가 (3번 제한 해결)
-DEFAULT_MAX_MESSAGES = 100  # 메시지 수 증가 (3번 제한 해결)
-DEFAULT_MESSAGE_HISTORY_LIMIT = 50  # 메시지 히스토리 제한 증가 (3번 제한 해결)
+DEFAULT_MAX_TURNS = 20  # 대화 턴 수 감소 (속도 개선)
+DEFAULT_MAX_MESSAGES = 50  # 메시지 수 감소 (속도 개선)
+DEFAULT_MESSAGE_HISTORY_LIMIT = 20  # 메시지 히스토리 제한 (속도 개선)
 
 # ========== 성능 최적화 상수 ==========
 MAX_CONTEXT_LENGTH = 2000  # 컨텍스트 최대 길이
