@@ -66,11 +66,11 @@ class ConversationTurn:
 class SessionManager:
     """세션 관리자 클래스"""
     
-    def __init__(self, max_sessions: int = 1000, session_timeout: int = 3600):
+    def __init__(self, max_sessions: int = 100, session_timeout: int = 1800):
         """
         Args:
-            max_sessions: 최대 세션 수
-            session_timeout: 세션 타임아웃 (초)
+            max_sessions: 최대 세션 수 (100으로 감소 - 메모리 절약)
+            session_timeout: 세션 타임아웃 (30분으로 단축 - 메모리 절약)
         """
         self.max_sessions = max_sessions
         self.session_timeout = session_timeout
@@ -279,18 +279,50 @@ class SessionManager:
         return True
     
     def cleanup_expired_sessions(self) -> int:
-        """만료된 세션 정리"""
+        """만료된 세션 정리 (메모리 누수 방지 강화)"""
+        import gc
+        
         expired_sessions = []
         
         for session_id, session in self._sessions.items():
             if self._is_session_expired(session):
                 expired_sessions.append(session_id)
         
+        # 만료된 세션 삭제
         for session_id in expired_sessions:
             self.delete_session(session_id)
         
+        # 메모리 사용량이 높으면 강제 가비지 컬렉션
+        if len(self._sessions) > self.max_sessions * 0.8:  # 80% 이상 사용시
+            logger.warning(f"[SESSION] High session count ({len(self._sessions)}), forcing cleanup")
+            gc.collect()
+        
         logger.info(f"[SESSION] Cleaned up {len(expired_sessions)} expired sessions")
         return len(expired_sessions)
+    
+    def force_cleanup_old_sessions(self) -> int:
+        """오래된 세션 강제 정리 (메모리 누수 방지)"""
+        import gc
+        from datetime import datetime, timedelta
+        
+        # 1시간 이상 비활성 세션 강제 삭제
+        cutoff_time = datetime.now() - timedelta(hours=1)
+        old_sessions = []
+        
+        for session_id, session in self._sessions.items():
+            last_activity = datetime.fromisoformat(session.last_activity) if isinstance(session.last_activity, str) else session.last_activity
+            if last_activity < cutoff_time:
+                old_sessions.append(session_id)
+        
+        # 오래된 세션 삭제
+        for session_id in old_sessions:
+            self.delete_session(session_id)
+        
+        # 가비지 컬렉션 강제 실행
+        gc.collect()
+        
+        logger.info(f"[SESSION] Force cleaned up {len(old_sessions)} old sessions")
+        return len(old_sessions)
     
     def _is_session_expired(self, session: SessionContext) -> bool:
         """세션 만료 여부 확인"""

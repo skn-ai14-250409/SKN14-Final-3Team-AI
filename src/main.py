@@ -70,10 +70,15 @@ async def startup_event():
     
     # 모델 사전 로딩 (선택사항)
     try:
-        from src.langgraph.utils import get_shared_slm, get_shared_vector_store
+        from src.langgraph.utils import get_shared_slm, get_shared_vector_store, get_memory_usage
         logger.info("모델 사전 로딩 중...")
         slm = get_shared_slm()
         vector_store = get_shared_vector_store()
+        
+        # 메모리 사용량 확인
+        memory_info = get_memory_usage()
+        logger.info(f"📊 [STARTUP] Memory usage: {memory_info['rss_mb']:.2f}MB")
+        
         logger.info("✅ 모델 로딩 완료")
     except Exception as e:
         logger.warning(f"모델 사전 로딩 실패 (정상 동작): {e}")

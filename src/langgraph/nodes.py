@@ -97,6 +97,14 @@ def session_init_node(state: RAGState) -> RAGState:
     """세션 초기화"""
     if INFO_MODE:
         logger.info("[NODE] session_init_node 실행 시작")
+    
+    # 메모리 사용량 모니터링
+    from .utils import get_memory_usage, force_memory_cleanup
+    memory_info = get_memory_usage()
+    if memory_info["rss_mb"] > 400:  # 400MB 이상이면 경고
+        logger.warning(f"⚠️ [MEMORY] High memory usage: {memory_info['rss_mb']:.2f}MB")
+        force_memory_cleanup()
+    
     try:
         # 실행 경로 추적
         state = track_execution_path(state, "session_init_node")
@@ -127,18 +135,25 @@ def session_init_node(state: RAGState) -> RAGState:
         # Django에서 전달받은 conversation_history가 있으면 사용, 없으면 세션 매니저에서 로드
         django_history = state.get("conversation_history", [])
         if django_history:
-            # 성능 최적화: 최근 5개 메시지만 사용 (12번째 턴에서 성능 저하 방지)
-            recent_history = django_history[-5:] if len(django_history) > 5 else django_history
+            # 메모리 절약: 최근 3개 메시지만 사용 (3번째 턴부터 메모리 누수 방지)
+            recent_history = django_history[-3:] if len(django_history) > 3 else django_history
             logger.info(f"[SESSION_INIT] Using Django conversation history: {len(recent_history)} messages (total: {len(django_history)})")
             conversation_history = recent_history
         else:
-            conversation_history = session_manager.get_conversation_history(session_context.session_id, limit=10)
+            conversation_history = session_manager.get_conversation_history(session_context.session_id, limit=5)  # 5개로 제한
+        
+        # 메시지 히스토리 제한 (메모리 누수 방지)
+        current_messages = state.get("messages", [])
+        if len(current_messages) > 6:  # 최대 6개 메시지만 유지 (3턴)
+            current_messages = current_messages[-6:]
+            logger.info(f"[SESSION_INIT] Trimmed messages: {len(state.get('messages', []))} -> {len(current_messages)}")
         
         return {
             **state,
             "session_context": session_context,
             "turn_id": turn_id,
             "conversation_history": conversation_history,
+            "messages": current_messages,  # 제한된 메시지 히스토리
             # 각 턴마다 초기화해야 할 필드들
             "product_name": "",
             "product_extraction_result": None,
@@ -164,7 +179,8 @@ def session_init_node(state: RAGState) -> RAGState:
             **state,
             "session_context": session_context,
             "turn_id": f"turn_{int(time.time())}",
-            "conversation_history": []
+            "conversation_history": [],
+            "messages": []  # 메시지 히스토리 초기화
         }
 
 def supervisor_node(state: RAGState, llm=None, slm: SLM = None) -> RAGState:
@@ -639,14 +655,14 @@ def rag_search_node(state: RAGState, slm: SLM = None, vector_store=None) -> RAGS
         messages = state.get("messages", [])
         enhanced_query = query
         
-        # 성능 최적화: 맥락 처리 제한 (최근 2개 메시지만)
+        # 메모리 절약: 맥락 처리 제한 (최근 1개 메시지만)
         if messages and len(messages) > 1:
-            # 최근 2개 메시지만 고려하여 성능 향상
-            recent_messages = messages[-2:] if len(messages) >= 2 else messages
+            # 최근 1개 메시지만 고려하여 메모리 절약
+            recent_messages = messages[-1:] if len(messages) >= 1 else messages
             context_parts = []
             for msg in recent_messages:
-                if hasattr(msg, 'content') and len(msg.content) < 50:  # 짧은 메시지만
-                    context_parts.append(msg.content[:20])  # 20자로 제한
+                if hasattr(msg, 'content') and len(msg.content) < 30:  # 더 짧은 메시지만
+                    context_parts.append(msg.content[:15])  # 15자로 제한
             
             if context_parts:
                 context_snippet = " ".join(context_parts)
