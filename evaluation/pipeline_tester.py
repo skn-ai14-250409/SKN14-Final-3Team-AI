@@ -280,7 +280,7 @@ class PipelineTester:
             response = requests.post(
                 f"{self.base_url}/langgraph/langgraph_rag",
                 json={"prompt": prompt},
-                timeout=300
+                timeout=120  # 2분으로 설정
             )
             elapsed = round(time.time() - start_time, 2)
             

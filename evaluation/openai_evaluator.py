@@ -54,10 +54,13 @@ class OpenAIAnswerEvaluator:
 
             다음 기준으로 답변 품질을 평가해주세요:
 
-            1. 정확성 (Accuracy): 답변이 사실적으로 정확한가?
-            2. 완성도 (Completeness): 질문에 대한 답변이 충분히 완성되었는가?
-            3. 관련성 (Relevance): 답변이 질문과 관련성이 있는가?
-            4. 유용성 (Usefulness): 사용자에게 도움이 되는 답변인가?
+            1. 정확성 (Accuracy): 답변이 사실적으로 정확한가? (핵심 정보가 포함되어 있으면 긴 답변도 좋음)
+            2. 완성도 (Completeness): 질문에 대한 답변이 충분히 완성되었는가? (상세한 설명은 장점)
+            3. 관련성 (Relevance): 답변이 질문과 관련성이 있는가? (관련 정보가 많아도 좋음)
+            4. 유용성 (Usefulness): 사용자에게 도움이 되는 답변인가? (자세한 정보는 더 유용할 수 있음)
+            
+            **중요**: 답변이 길어도 정확하고 유용한 정보가 포함되어 있으면 높은 점수를 주세요.
+            단순히 길다고 낮은 점수를 주지 마세요.
 
             평가 결과를 다음 JSON 형식으로만 응답해주세요:
             {{
@@ -148,17 +151,21 @@ class OpenAIAnswerEvaluator:
             })
         return results
     
-    def evaluate_answer_quality_only(self, query: str, actual_answer: str) -> Dict[str, Any]:
+    def evaluate_answer_quality_only(self, query: str, actual_answer: str, max_length: int = 2000) -> Dict[str, Any]:
         """
         정답 없이 답변의 품질만 평가합니다.
         
         Args:
             query: 사용자 질문
             actual_answer: 실제 생성된 답변
+            max_length: 평가할 최대 답변 길이 (긴 답변은 자동으로 잘림)
             
         Returns:
             평가 결과 딕셔너리
         """
+        # 긴 답변은 자동으로 잘라서 평가
+        if len(actual_answer) > max_length:
+            actual_answer = actual_answer[:max_length] + "..."
         prompt = f"""
             다음 질문에 대한 답변의 품질을 평가해주세요.
 
@@ -167,10 +174,13 @@ class OpenAIAnswerEvaluator:
             답변: {actual_answer}
 
             다음 기준으로 평가해주세요:
-            1. 정확성 (Accuracy): 답변이 사실적으로 정확한가?
-            2. 완성도 (Completeness): 질문에 충분히 답했는가?
-            3. 관련성 (Relevance): 질문과 관련된 내용인가?
-            4. 명확성 (Clarity): 이해하기 쉽게 설명되었는가?
+            1. 정확성 (Accuracy): 답변이 사실적으로 정확한가? (핵심 정보가 정확하면 좋음)
+            2. 완성도 (Completeness): 질문에 충분히 답했는가? (상세한 설명은 장점)
+            3. 관련성 (Relevance): 질문과 관련된 내용인가? (관련 정보가 많아도 좋음)
+            4. 명확성 (Clarity): 이해하기 쉽게 설명되었는가? (구체적인 정보는 더 좋음)
+            
+            **중요**: 답변이 길어도 정확하고 유용한 정보가 포함되어 있으면 높은 점수를 주세요.
+            단순히 길다고 낮은 점수를 주지 마세요.
 
             각 기준을 1-10점으로 평가하고, 전체적으로 Good/Normal/Bad 중 하나로 평가해주세요.
 
