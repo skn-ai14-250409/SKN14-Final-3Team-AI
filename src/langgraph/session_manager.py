@@ -147,8 +147,8 @@ class SessionManager:
         
         self._conversations[session_id].append(turn)
         
-        # 최대 대화 턴 수 제한 (메모리 관리) - 더 엄격한 제한
-        max_turns = min(DEFAULT_MAX_TURNS, 10)  # 최대 10개 턴으로 제한
+        # 최대 대화 턴 수 제한 (메모리 관리) - 제한 완화 (3번 제한 해결)
+        max_turns = min(DEFAULT_MAX_TURNS, 50)  # 최대 50개 턴으로 제한 증가
         if len(self._conversations[session_id]) > max_turns:
             self._conversations[session_id] = self._conversations[session_id][-max_turns:]
             logger.info(f"[SESSION] Trimmed conversation history to {max_turns} turns for session {session_id}")
