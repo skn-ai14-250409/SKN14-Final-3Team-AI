@@ -36,6 +36,7 @@
 
 from typing import Any
 import logging
+import requests
 
 from langchain_openai import ChatOpenAI
 
@@ -234,26 +235,42 @@ class SLM:
     def __init__(self):
         self.provider = MODEL_PROVIDER
 
-        print(f'{MODEL_NAME=}')       
-        print(f'{MODEL_KEY=}')       
-        print(f'{MODEL_BASE_URL=}')       
-        print(f'{MODEL_PROVIDER=}')       
-        print(f'{ENABLE_OPENAI_FALLBACK=}')
-        print(f'{FALLBACK_MODEL_NAME=}')     
-
-        primary_llm = self._create_llm(
-            model_name=MODEL_NAME,
-            api_key=MODEL_KEY,
-            base_url=MODEL_BASE_URL,
-            allow_dummy_key=(MODEL_PROVIDER == "vllm"),
+        self._vllm_available = None  # vLLM 상태 캐싱
+        
+        # vLLM 서버가 실제로 실행 중인지 먼저 확인
+        vllm_available = (
+            MODEL_PROVIDER == "vllm"
+            and MODEL_BASE_URL
+            and self._check_vllm_server()
         )
+        
+        # vLLM 사용 가능 여부에 따라 primary_llm 생성
+        if vllm_available:
+            primary_llm = self._create_llm(
+                model_name=MODEL_NAME,
+                api_key=MODEL_KEY,
+                base_url=MODEL_BASE_URL,
+                allow_dummy_key=True,  # vLLM은 API 키 불필요
+            )
+        else:
+            # vLLM 사용 불가 시 OpenAI로 직접 생성
+            primary_llm = self._create_llm(
+                model_name=FALLBACK_MODEL_NAME or MODEL_NAME,
+                api_key=MODEL_KEY,
+                base_url=None,
+                allow_dummy_key=False,
+            )
+            logger.info("vLLM 사용 불가 - OpenAI 모델 '%s'로 직접 사용", FALLBACK_MODEL_NAME or MODEL_NAME)
 
         fallback_llm: ChatOpenAI | None = None
+        
+        # vLLM 사용 가능 시에만 폴백 설정 (성재 모델이 로드된 경우 폴백 비활성화)
         if (
-            MODEL_PROVIDER == "vllm"
+            vllm_available
             and MODEL_KEY
             and ENABLE_OPENAI_FALLBACK
             and FALLBACK_MODEL_NAME
+            and not MODEL_NAME.startswith("sssssungjae/")  # 성재 모델인 경우 폴백 비활성화
         ):
             try:
                 fallback_llm = self._create_llm(
@@ -272,14 +289,51 @@ class SLM:
                     exc_info=True,
                 )
 
+        # LLM 설정
         fallback_label = FALLBACK_MODEL_NAME or "openai-fallback"
-        self.llm: ChatOpenAI | _FallbackChatWrapper
         if fallback_llm:
             self.llm = _FallbackChatWrapper(primary_llm, fallback_llm, fallback_label)
         else:
             self.llm = primary_llm
+        
+        # 내부 참조 저장
         self._primary_llm = primary_llm
         self._fallback_llm = fallback_llm
+    
+    def _check_vllm_server(self) -> bool:
+        """vLLM 서버가 실제로 실행 중인지 확인 (캐싱)"""
+        if self._vllm_available is not None:
+            return self._vllm_available
+            
+        if not MODEL_BASE_URL:
+            self._vllm_available = False
+            return False
+        
+        try:
+            # vLLM 서버 헬스체크 - /models 사용 (MODEL_BASE_URL에 이미 /v1 포함)
+            response = requests.get(f"{MODEL_BASE_URL}/models", timeout=5)
+            if response.status_code == 200:
+                # 실제로 로드된 모델 확인
+                models_data = response.json()
+                if models_data.get("data"):
+                    loaded_model_id = models_data["data"][0].get("id", "")
+                    if loaded_model_id == MODEL_NAME:
+                        self._vllm_available = True
+                        logger.info(f"vLLM 서버 연결 성공 - 모델 '{loaded_model_id}' 로드됨")
+                    else:
+                        self._vllm_available = False
+                        logger.warning(f"vLLM 서버에 잘못된 모델이 로드됨: '{loaded_model_id}' (예상: '{MODEL_NAME}') - OpenAI 모델로 전환")
+                else:
+                    self._vllm_available = False
+                    logger.warning("vLLM 서버에 모델이 로드되지 않음 - OpenAI 모델로 전환")
+            else:
+                self._vllm_available = False
+                logger.warning("vLLM 서버 연결 실패 - OpenAI 모델로 전환")
+            return self._vllm_available
+        except Exception as e:
+            logger.warning(f"vLLM 서버 연결 실패 - OpenAI 모델로 전환: {e}")
+            self._vllm_available = False
+            return False
 
     def invoke(
         self,
@@ -308,8 +362,8 @@ class SLM:
             model=model_name,
             temperature=0.1,  # 일관성 향상 및 속도 개선
             max_tokens=500,   # 응답 길이 더 제한 (1000 → 500)
-            request_timeout=30,  # 타임아웃 증가 (10 → 30)
-            max_retries=3,  # 재시도 횟수 더 제한 (1 → 3)
+            request_timeout=15,  # 타임아웃 감소 (30 → 15) - 더 빠른 응답
+            max_retries=1,  # 재시도 횟수 감소 (3 → 1) - 빠른 실패
         )
         if base_url:
             llm_kwargs["base_url"] = base_url
