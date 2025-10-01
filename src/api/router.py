@@ -290,7 +290,7 @@ async def langgraph_rag(input: LangGraphRAGInput):
             media_type="application/json; charset=utf-8"
         )
     except asyncio.TimeoutError:
-        logger.error(f"[LANGGRAPH RAG] Request timeout (180s)")
+        logger.error(f"[LANGGRAPH RAG] Request timeout (60s)")
         error_response = LangGraphRAGResponse(
             status=STATUS_FAIL,
             response="요청 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.",
