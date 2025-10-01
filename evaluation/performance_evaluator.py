@@ -21,7 +21,7 @@ ENDPOINT_OPTIONS = {
 }
 
 # 테스트 설정
-REQUEST_TIMEOUT = 30  # 요청 타임아웃 (초)
+REQUEST_TIMEOUT = 120  # 요청 타임아웃 (초)
 API_DELAY = 1  # API 호출 간 대기 시간 (초)
 MAX_DISPLAY_SOURCES = 3  # 표시할 최대 소스 문서 수
 
